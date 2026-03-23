@@ -1,0 +1,4 @@
+waves/
+obj_dir/
+*.vcd
+.venv/
