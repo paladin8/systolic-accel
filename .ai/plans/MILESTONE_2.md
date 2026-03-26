@@ -24,7 +24,7 @@
 
 5. **Test vectors: plain text** — Python reference model writes a simple text file. Parsed with `fscanf` in C++.
 
-6. **Test coverage: thorough + timing** — 6 hardcoded tests plus 1 Python-generated random test.
+6. **Test coverage: thorough + timing** — 7 hardcoded tests plus 1 Python-generated random test.
 
 7. **Skew registers: freeze on enable=0** — Skew registers gated by `enable` and cleared by `rst_n`, matching MAC behavior.
 
@@ -149,8 +149,9 @@ if __name__ == "__main__":
 3. **Zero matrix** — A = arbitrary, B = 0. All results = 0.
 4. **Counting matrix** — A[i][j] = i*N+j+1, B = I. C = A.
 5. **Negative values** — Mixed positive/negative, hardcoded expected values.
-6. **Timing verification** — Verify C[0][0] valid at compute cycle N, C[N-1][N-1] valid at cycle 3N-2.
-7. **Random (file-loaded)** — Load `tb/test_vectors.txt`, compare against reference C.
+6. **Weight reuse** — Load weights once, compute C1 = A1*B and C2 = A2*B back-to-back without reloading. Verifies the core weight-stationary advantage.
+7. **Timing verification** — Verify C[0][0] valid at compute cycle N, C[N-1][N-1] valid at cycle 3N-2.
+8. **Random (file-loaded)** — Load `tb/test_vectors.txt`, compare against reference C.
 
 ### Makefile Target
 
@@ -159,6 +160,7 @@ sim_array:
 	uv run python tb/ref_matmul.py 4
 	verilator --cc --exe --build --trace \
 		-Wall -Wno-fatal \
+		--top-module systolic_array \
 		rtl/mac_unit.sv rtl/systolic_array.sv tb/tb_systolic_array.cpp \
 		-o array_sim
 	./obj_dir/array_sim
@@ -175,7 +177,7 @@ VCD output: `waves/systolic_array.vcd`
 | `Makefile` | Modify | Add `sim_array` target |
 | `rtl/systolic_array.sv` | Create | NxN MAC grid with weight loading and activation skewing |
 | `tb/ref_matmul.py` | Create | Python reference model, plain-text output |
-| `tb/tb_systolic_array.cpp` | Create | Verilator C++ testbench — 6 hardcoded + 1 random test |
+| `tb/tb_systolic_array.cpp` | Create | Verilator C++ testbench — 7 hardcoded + 1 random test |
 
 ---
 
@@ -347,7 +349,36 @@ git commit -m "add counting matrix and negative values tests"
 
 ---
 
-### Task 7: Timing Verification Test
+### Task 7: Weight Reuse Test
+
+**Files:**
+- Modify: `tb/tb_systolic_array.cpp`
+
+- [ ] **Step 1: Add weight reuse test**
+
+Load weights B once. Compute C1 = A1 * B, then compute C2 = A2 * B back-to-back without reloading weights. Use two different A matrices with known expected results.
+
+Key details:
+- Call `load_weights` once
+- Call `feed_and_capture` for A1, verify C1
+- Call `feed_and_capture` again for A2 (no reset, no reload), verify C2
+- This requires `feed_and_capture` to work without a preceding reset — the pipeline drains naturally between computations since trailing zeros flush the partial sums
+
+- [ ] **Step 2: Build and run**
+
+Run: `make sim_array`
+Expected: All 6 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tb/tb_systolic_array.cpp
+git commit -m "add weight reuse test — back-to-back matmul without reload"
+```
+
+---
+
+### Task 8: Timing Verification Test
 
 **Files:**
 - Modify: `tb/tb_systolic_array.cpp`
@@ -364,7 +395,7 @@ This requires a manual tick loop that checks drain_out at intermediate cycles.
 - [ ] **Step 2: Build and run**
 
 Run: `make sim_array`
-Expected: All 6 tests pass.
+Expected: All 7 tests pass.
 
 - [ ] **Step 3: Commit**
 
@@ -375,7 +406,7 @@ git commit -m "add timing verification test for systolic array"
 
 ---
 
-### Task 8: Random Test (Python-Generated)
+### Task 9: Random Test (Python-Generated)
 
 **Files:**
 - Modify: `tb/tb_systolic_array.cpp`
@@ -391,7 +422,7 @@ Parse `tb/test_vectors.txt`:
 - [ ] **Step 2: Build and run**
 
 Run: `make sim_array`
-Expected: All 7 tests pass (6 hardcoded + 1 file-loaded random).
+Expected: All 8 tests pass (7 hardcoded + 1 file-loaded random).
 
 - [ ] **Step 3: Commit**
 
@@ -402,7 +433,7 @@ git commit -m "add random matrix test with Python-generated vectors"
 
 ---
 
-### Task 9: Final Verification
+### Task 10: Final Verification
 
 - [ ] **Step 1: Clean build and run**
 
