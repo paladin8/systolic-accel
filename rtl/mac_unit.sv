@@ -5,16 +5,26 @@ module mac_unit #(
     input  logic                  clk,
     input  logic                  rst_n,
     input  logic                  enable,
-    input  logic                  clear_acc,
+    input  logic                  load_weight,
     input  logic [DATA_WIDTH-1:0] a,
     input  logic [DATA_WIDTH-1:0] b,
     output logic [DATA_WIDTH-1:0] a_out,
     output logic [DATA_WIDTH-1:0] b_out,
-    output logic [ACC_WIDTH-1:0]  result
+    input  logic [ACC_WIDTH-1:0]  psum_in,
+    output logic [ACC_WIDTH-1:0]  psum_out
 );
 
-    logic [ACC_WIDTH-1:0] mult_reg;
-    logic [ACC_WIDTH-1:0] acc_reg;
+    logic [DATA_WIDTH-1:0] weight_reg;
+    logic [ACC_WIDTH-1:0]  mult_reg;
+
+    // Weight register — loaded during weight phase, stationary during compute
+    // Synthesizes to: weight_reg[DATA_WIDTH] flip-flops
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            weight_reg <= '0;
+        else if (enable && load_weight)
+            weight_reg <= b;
+    end
 
     // Stage 1: registered multiplier output + passthrough
     // Synthesizes to: mult_reg[ACC_WIDTH] + a_out[DATA_WIDTH] + b_out[DATA_WIDTH] flip-flops
@@ -24,25 +34,19 @@ module mac_unit #(
             a_out    <= '0;
             b_out    <= '0;
         end else if (enable) begin
-            mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(b));
+            mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(weight_reg));
             a_out    <= a;
             b_out    <= b;
         end
     end
 
-    // Stage 2: accumulator register
-    // Synthesizes to: acc_reg[ACC_WIDTH] flip-flops
+    // Stage 2: partial sum addition
+    // Synthesizes to: psum_out[ACC_WIDTH] flip-flops
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            acc_reg <= '0;
-        end else if (enable) begin
-            if (clear_acc)
-                acc_reg <= mult_reg;
-            else
-                acc_reg <= acc_reg + mult_reg;
-        end
+        if (!rst_n)
+            psum_out <= '0;
+        else if (enable)
+            psum_out <= psum_in + mult_reg;
     end
-
-    assign result = acc_reg;
 
 endmodule
