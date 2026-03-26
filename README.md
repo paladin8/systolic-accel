@@ -40,8 +40,8 @@ waves/        VCD waveform output (gitignored)
 ## Design Overview
 
 - **NxN systolic array** of pipelined MAC units (default 4x4, 16-bit operands, 32-bit accumulator)
-- **Weight-stationary dataflow** with input skewing for correct matrix multiply timing
-- **2-stage MAC pipeline** — multiply then accumulate, with registered passthrough to neighbors
+- **Weight-stationary dataflow (TPU-style)** — weights pre-loaded, activations stream through, partial sums flow down
+- **2-stage MAC pipeline** — multiply activation by stored weight, then add partial sum from above
 - **Scratchpad memory** and **tiling controller** for matrices larger than the array
 
 See `docs/ARCHITECTURE.md` for detailed design analysis.

@@ -83,47 +83,59 @@ echo -e "waves/\nobj_dir/\n*.vcd" > .gitignore
 
 ### M1: MAC unit
 
-A parameterized, pipelined multiply-accumulate unit.
+A parameterized, pipelined multiply-accumulate unit for weight-stationary systolic dataflow. Each MAC holds a pre-loaded weight, multiplies it by streaming activations, and forwards partial sums vertically.
 
 **Module: `rtl/mac_unit.sv`**
 
 Parameters:
 
 - `DATA_WIDTH` — operand bit width (default 16)
-- `ACC_WIDTH` — accumulator bit width (default 32)
+- `ACC_WIDTH` — accumulator/partial-sum bit width (default 32)
 
 Ports:
 
 
-| Port        | Direction | Width      | Description                                      |
-| ----------- | --------- | ---------- | ------------------------------------------------ |
-| `clk`       | input     | 1          | Clock                                            |
-| `rst_n`     | input     | 1          | Active-low reset                                 |
-| `enable`    | input     | 1          | Pipeline enable                                  |
-| `clear_acc` | input     | 1          | Reset accumulator to zero                        |
-| `a`         | input     | DATA_WIDTH | Operand A (activation)                           |
-| `b`         | input     | DATA_WIDTH | Operand B (weight)                               |
-| `a_out`     | output    | DATA_WIDTH | Registered passthrough of A (to right neighbor)  |
-| `b_out`     | output    | DATA_WIDTH | Registered passthrough of B (to bottom neighbor) |
-| `result`    | output    | ACC_WIDTH  | Accumulated result                               |
+| Port          | Direction | Width      | Description                                           |
+| ------------- | --------- | ---------- | ----------------------------------------------------- |
+| `clk`         | input     | 1          | Clock                                                 |
+| `rst_n`       | input     | 1          | Active-low reset                                      |
+| `enable`      | input     | 1          | Pipeline enable                                       |
+| `load_weight` | input     | 1          | Latch `b` into weight register                        |
+| `a`           | input     | DATA_WIDTH | Activation input (from left neighbor or array edge)   |
+| `b`           | input     | DATA_WIDTH | Weight data input (from top, used during loading)     |
+| `a_out`       | output    | DATA_WIDTH | Registered passthrough of A (to right neighbor)       |
+| `b_out`       | output    | DATA_WIDTH | Registered passthrough of B (to bottom neighbor)      |
+| `psum_in`     | input     | ACC_WIDTH  | Partial sum from top neighbor (0 for top row)         |
+| `psum_out`    | output    | ACC_WIDTH  | Partial sum to bottom neighbor                        |
 
+
+Internal registers:
+
+- `weight_reg` — stored weight, loaded when `load_weight` is high, fixed during compute
+- `mult_reg` — stage 1 multiply result
+- `a_out` — activation passthrough register
+- `b_out` — weight passthrough register (for loading chain)
+- `psum_out` — stage 2 partial sum output register
 
 Pipeline stages:
 
-1. **Stage 1 (multiply):** Register `a * b` into `mult_reg`. Simultaneously register `a` → `a_out` and `b` → `b_out`.
-2. **Stage 2 (accumulate):** `acc_reg <= clear_acc ? mult_reg : acc_reg + mult_reg`
+1. **Weight register:** Loads `b` into `weight_reg` when `load_weight && enable`. Holds value otherwise.
+2. **Stage 1 (multiply + passthrough):** `mult_reg <= $signed(a) * $signed(weight_reg)`. Simultaneously register `a` → `a_out` and `b` → `b_out`.
+3. **Stage 2 (partial sum):** `psum_out <= psum_in + mult_reg`
 
-Total latency from input to reflected accumulator value: 2 cycles.
+Total latency from activation input to partial sum output: 2 cycles.
 
 **Testbench: `tb/tb_mac_unit.cpp`**
 
 Test cases:
 
-- Basic accumulation: feed 4 (a, b) pairs, verify sum-of-products after pipeline drain
-- Reset: assert `rst_n` low, verify accumulator clears to zero
-- Clear mid-stream: assert `clear_acc` between two accumulation sequences, verify isolation
-- Passthrough timing: verify `a_out` and `b_out` appear exactly 1 cycle after `a` and `b`
-- Boundary: feed max-value inputs, verify accumulator overflow behavior at ACC_WIDTH boundary
+- Weight loading: load a weight via `load_weight`, verify it persists during compute
+- Multiply + passthrough timing: verify `a_out` appears 1 cycle after `a`, `mult_reg` uses stored weight
+- Partial sum chain: feed `psum_in` and activation, verify `psum_out = psum_in + a * weight`
+- Weight loading chain: verify `b_out` passes weights through for column loading
+- Reset: assert `rst_n` low, verify all registers clear
+- Enable stall: verify all registers freeze when `enable=0`
+- Signed values: negative activations and weights
 
 Dump VCD to `waves/mac_unit.vcd`.
 
@@ -138,13 +150,13 @@ sim_mac:
 	./obj_dir/mac_sim
 ```
 
-**Done when:** All test cases pass. Waveform shows the 2-stage pipeline timing — `mult_reg` updates one cycle after inputs, `acc_reg` updates one cycle after that.
+**Done when:** All test cases pass. Waveform shows weight staying fixed during compute, 2-stage pipeline timing for partial sums, and correct activation passthrough.
 
 ---
 
 ### M2: Systolic array
 
-An NxN grid of MAC units with weight-stationary systolic dataflow.
+An NxN grid of MAC units with weight-stationary systolic dataflow, matching the Google TPU architecture.
 
 **Module: `rtl/systolic_array.sv`**
 
@@ -156,47 +168,55 @@ Parameters:
 Ports:
 
 
-| Port                     | Direction | Width           | Description                 |
-| ------------------------ | --------- | --------------- | --------------------------- |
-| `clk`, `rst_n`, `enable` | input     | 1               | Global control              |
-| `clear_acc`              | input     | 1               | Clear all accumulators      |
-| `a_in[ROWS]`             | input     | DATA_WIDTH each | Left-edge activation inputs |
-| `b_in[COLS]`             | input     | DATA_WIDTH each | Top-edge weight inputs      |
-| `result[ROWS][COLS]`     | output    | ACC_WIDTH each  | Per-MAC accumulated results |
+| Port                     | Direction | Width           | Description                                      |
+| ------------------------ | --------- | --------------- | ------------------------------------------------ |
+| `clk`, `rst_n`, `enable` | input     | 1               | Global control                                   |
+| `load_weight`            | input     | 1               | Weight loading mode                              |
+| `a_in[ROWS]`             | input     | DATA_WIDTH each | Left-edge activation inputs                      |
+| `b_in[COLS]`             | input     | DATA_WIDTH each | Top-edge weight inputs (used during loading)     |
+| `drain_out[COLS]`        | output    | ACC_WIDTH each  | Bottom-edge partial sum outputs (result stream)  |
 
+
+**Operation phases:**
+
+1. **Weight loading** (`load_weight=1`): Feed weight matrix B through `b_in`, one row per cycle in reverse row order (B[K-1] first, B[0] last). Weights shift down through each column via `b_out` chains. After K cycles, MAC[k][j] holds B[k][j].
+
+2. **Compute** (`load_weight=0`): Feed activation rows through `a_in`. Activations flow left-to-right, partial sums flow top-to-bottom. Results emerge at `drain_out[j]` (bottom of each column).
 
 Internal wiring (generate block):
 
-- `mac[i][j].a` ← `mac[i][j-1].a_out` (or `a_in[i]` for j=0)
-- `mac[i][j].b` ← `mac[i-1][j].b_out` (or `b_in[j]` for i=0)
+- `mac[k][j].a` ← `mac[k][j-1].a_out` (or skewed `a_in[k]` for j=0)
+- `mac[k][j].b` ← `mac[k-1][j].b_out` (or `b_in[j]` for k=0)
+- `mac[k][j].psum_in` ← `mac[k-1][j].psum_out` (or `0` for k=0)
+- `drain_out[j]` ← `mac[ROWS-1][j].psum_out`
 
-**Input skewing:**
+**Input skewing (activations only):**
 
-For a correct matrix multiply C = A × B, row `i`'s activation stream must be delayed by `i` cycles and column `j`'s weight stream must be delayed by `j` cycles. Implement as shift-register chains on the array inputs:
+Row `k`'s activation is delayed by `k` cycles via inline shift-register chain. No column skewing — weights are pre-loaded, not streamed.
 
 ```
-Row 0: a_in[0] feeds directly
+Row 0: a_in[0] feeds directly to MAC[0][0]
 Row 1: a_in[1] feeds through 1 register delay
 Row 2: a_in[2] feeds through 2 register delays
 Row 3: a_in[3] feeds through 3 register delays
-(Same pattern for columns with b_in)
 ```
-
-Implement as a separate `input_skew` module or inline in `systolic_array.sv`.
 
 **Timing:**
 
-For an N×N matmul on an N×N array with 2-stage MAC pipeline:
+For an N×N matmul (C = A × B) on an N×N array with 2-stage MAC pipeline:
 
-- First valid output: cycle `N + N + 1` (max skew + pipeline depth)
-- Last valid output: cycle `N + N + N` (last skewed input propagates through full array)
-- All N² results are valid after the drain completes
+- Weight loading: N cycles
+- Compute: `C[m][j]` appears at `drain_out[j]` at cycle `N + m + j` from compute start
+- First valid output (C[0][0]): cycle `N` from compute start
+- All N² results streamed: cycle `N + (N-1) + (N-1)` = `3N - 2` from compute start
+- Total cycles (load + compute): `N + 3N - 2` = `4N - 2`
+
+Results stream from `drain_out` one at a time — the testbench (or M4 controller) must capture each `drain_out[j]` at the correct cycle.
 
 **Reference model: `tb/ref_matmul.py`**
 
 ```python
 import numpy as np
-import json
 import sys
 
 def generate(n=4, seed=42):
@@ -204,23 +224,31 @@ def generate(n=4, seed=42):
     A = rng.randint(-128, 127, (n, n)).astype(np.int16)
     B = rng.randint(-128, 127, (n, n)).astype(np.int16)
     C = A.astype(np.int32) @ B.astype(np.int32)
-    json.dump({"A": A.tolist(), "B": B.tolist(), "C": C.tolist()},
-              open("tb/test_vectors.json", "w"))
+
+    with open("tb/test_vectors.txt", "w") as f:
+        f.write(f"{n}\n")
+        for row in A:
+            f.write(" ".join(str(x) for x in row) + "\n")
+        for row in B:
+            f.write(" ".join(str(x) for x in row) + "\n")
+        for row in C:
+            f.write(" ".join(str(x) for x in row) + "\n")
 
 if __name__ == "__main__":
-    generate(int(sys.argv[1]) if len(sys.argv) > 1 else 4)
+    generate(int(sys.argv[1]) if len(sys.argv) > 1 else 4,
+             int(sys.argv[2]) if len(sys.argv) > 2 else 42)
 ```
 
 **Testbench: `tb/tb_systolic_array.cpp`**
 
-- Load test vectors from `tb/test_vectors.json` (or hardcode small cases initially)
-- Feed the pre-skewed input sequence cycle-by-cycle
-- Wait for full drain period
-- Read `result[i][j]` for all i, j and compare against reference `C[i][j]`
-- Test cases: identity multiply, random matrices, zero matrix, matrix with single nonzero element (verifies routing)
+- Load weights via `load_weight` phase
+- Feed activations (un-skewed — hardware handles skewing)
+- Capture `drain_out[j]` at the correct cycle for each result element
+- Compare against reference model
+- Test cases: identity multiply, single nonzero element (verifies routing), zero matrix, counting matrix, negative values, timing verification, random (Python-generated)
 - Dump VCD to `waves/systolic_array.vcd`
 
-**Done when:** 4×4 matmul produces correct results for all test cases. Can trace a single partial product (e.g., A[1][2] × B[2][3]) through the waveform and verify it arrives at MAC[1][3] on the expected cycle.
+**Done when:** 4×4 matmul produces correct results for all test cases. Can trace a single partial product (e.g., A[1][2] × B[2][3]) through the waveform — weight B[2][3] loaded into MAC[2][3], activation A[1][2] enters row 2 and reaches column 3 via passthrough, partial sum emerges at `drain_out[3]`.
 
 ---
 
@@ -310,7 +338,7 @@ Inputs:
 Outputs:
 
 - Scratchpad addresses and read/write enables for A, B, C
-- Array control signals (`enable`, `clear_acc`)
+- Array control signals (`enable`, `load_weight`)
 - `done` — computation complete
 
 Start with the non-tiled case (M=N=K=array_size). Then generalize to arbitrary multiples with a tiling loop over K (accumulating partial results across tiles).

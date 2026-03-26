@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a parameterized, 2-stage pipelined multiply-accumulate unit with registered passthrough — the fundamental building block of the systolic array.
+**Goal:** Build a parameterized, 2-stage pipelined MAC unit for weight-stationary systolic dataflow — the fundamental building block of the systolic array. Each MAC holds a pre-loaded weight, multiplies it by streaming activations, and forwards partial sums vertically.
 
-**Architecture:** The MAC unit has two pipeline stages: stage 1 registers the product `a * b` into `mult_reg` and passes `a`/`b` through to neighbors; stage 2 accumulates `mult_reg` into `acc_reg` (or replaces it on `clear_acc`). Total latency from input to accumulated result: 2 clock cycles.
+**Architecture:** The MAC unit has a weight register (loaded once, stationary during compute) and two pipeline stages: stage 1 registers the product `a * weight_reg` into `mult_reg` and passes `a`/`b` through to neighbors; stage 2 adds `mult_reg` to the incoming partial sum `psum_in` and outputs `psum_out`. Total latency from activation input to partial sum output: 2 clock cycles.
 
 **Tech Stack:** SystemVerilog (Verilator 5.020 for simulation), C++ testbench, GNU Make
 
-**Spec reference:** `.ai/OVERALL_DESIGN.md` lines 84–141
+**Spec reference:** `.ai/OVERALL_DESIGN.md` M1 section
 
 ---
 
@@ -17,7 +17,7 @@
 | File | Action | Responsibility |
 |------|--------|----------------|
 | `Makefile` | Create | Build targets for Verilator simulation |
-| `rtl/mac_unit.sv` | Create | 2-stage pipelined MAC with registered passthrough |
+| `rtl/mac_unit.sv` | Create | 2-stage pipelined MAC with weight register and partial sum flow |
 | `tb/tb_mac_unit.cpp` | Create | Verilator C++ testbench — 7 test cases, VCD dump |
 
 ---
@@ -59,10 +59,11 @@ git commit -m "add Makefile with sim_mac target"
 
 The module interface is defined in the spec. Key details:
 - Parameters: `DATA_WIDTH=16`, `ACC_WIDTH=32`
-- 9 ports: `clk`, `rst_n`, `enable`, `clear_acc`, `a`, `b`, `a_out`, `b_out`, `result`
-- Two `always_ff` blocks: one for stage 1 (multiply + passthrough), one for stage 2 (accumulate)
-- All registers reset to zero on `!rst_n`
-- All registers gated by `enable`
+- 11 ports: `clk`, `rst_n`, `enable`, `load_weight`, `a`, `b`, `a_out`, `b_out`, `psum_in`, `psum_out`
+- Weight register: loaded when `load_weight && enable`, holds otherwise
+- Stage 1 `always_ff`: multiply `a * weight_reg` into `mult_reg`, register `a` → `a_out` and `b` → `b_out`
+- Stage 2 `always_ff`: `psum_out <= psum_in + mult_reg`
+- All registers reset to zero on `!rst_n`, gated by `enable`
 
 - [ ] **Step 1: Write `rtl/mac_unit.sv`**
 
@@ -74,51 +75,59 @@ module mac_unit #(
     input  logic                  clk,
     input  logic                  rst_n,
     input  logic                  enable,
-    input  logic                  clear_acc,
+    input  logic                  load_weight,
     input  logic [DATA_WIDTH-1:0] a,
     input  logic [DATA_WIDTH-1:0] b,
     output logic [DATA_WIDTH-1:0] a_out,
     output logic [DATA_WIDTH-1:0] b_out,
-    output logic [ACC_WIDTH-1:0]  result
+    input  logic [ACC_WIDTH-1:0]  psum_in,
+    output logic [ACC_WIDTH-1:0]  psum_out
 );
 
-    logic [ACC_WIDTH-1:0] mult_reg;
-    logic [ACC_WIDTH-1:0] acc_reg;
+    logic [DATA_WIDTH-1:0] weight_reg;
+    logic [ACC_WIDTH-1:0]  mult_reg;
 
-    // Stage 1: registered multiplier output + passthrough (3 registers: mult_reg, a_out, b_out)
+    // Weight register — loaded during weight phase, stationary during compute
+    // Synthesizes to: weight_reg[DATA_WIDTH] flip-flops
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            weight_reg <= '0;
+        else if (enable && load_weight)
+            weight_reg <= b;
+    end
+
+    // Stage 1: registered multiplier output + passthrough
+    // Synthesizes to: mult_reg[ACC_WIDTH] + a_out[DATA_WIDTH] + b_out[DATA_WIDTH] flip-flops
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             mult_reg <= '0;
             a_out    <= '0;
             b_out    <= '0;
         end else if (enable) begin
-            mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(b));
+            mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(weight_reg));
             a_out    <= a;
             b_out    <= b;
         end
     end
 
-    // Stage 2: accumulator register (1 register: acc_reg)
+    // Stage 2: partial sum addition
+    // Synthesizes to: psum_out[ACC_WIDTH] flip-flops
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            acc_reg <= '0;
-        end else if (enable) begin
-            if (clear_acc)
-                acc_reg <= mult_reg;
-            else
-                acc_reg <= acc_reg + mult_reg;
-        end
+        if (!rst_n)
+            psum_out <= '0;
+        else if (enable)
+            psum_out <= psum_in + mult_reg;
     end
-
-    assign result = acc_reg;
 
 endmodule
 ```
 
 Key design decisions:
-- Signed multiplication: `$signed()` casts make operands signed before widening to `ACC_WIDTH`, matching the spec's `int16 × int16 → int32` semantics. Uses `$signed()` over `signed'()` for broader Verilator compatibility.
-- `clear_acc` replaces (not zeroes) the accumulator — it loads `mult_reg` so the current product isn't lost.
-- Async reset on `rst_n` (standard for ASIC-style design with Verilator).
+- Weight register has separate load condition (`enable && load_weight`), not gated by stage 1. Weight stays fixed when `load_weight=0`.
+- Signed multiplication: `$signed()` casts for sign-extension before widening to `ACC_WIDTH`.
+- `b_out` always passes `b` through (used during weight loading to shift weights down the column).
+- `psum_out = psum_in + mult_reg` — no accumulator. Partial sums flow through, not stored.
+- Async reset on `rst_n` (ASIC convention).
 
 - [ ] **Step 2: Verify it compiles**
 
@@ -129,12 +138,12 @@ Expected: Clean compilation, `obj_dir/` populated with generated C++ files.
 
 ```bash
 git add rtl/mac_unit.sv
-git commit -m "add MAC unit RTL — 2-stage pipelined multiply-accumulate"
+git commit -m "add MAC unit RTL — weight-stationary with partial sum flow"
 ```
 
 ---
 
-### Task 3: Testbench Scaffold + Passthrough Timing Test
+### Task 3: Testbench Scaffold + Weight Loading Test
 
 **Files:**
 - Create: `tb/tb_mac_unit.cpp`
@@ -146,7 +155,7 @@ The testbench needs:
 - VCD trace setup (dump to `waves/mac_unit.vcd`)
 - Test pass/fail reporting with exit code
 
-- [ ] **Step 1: Write testbench scaffold with passthrough timing test**
+- [ ] **Step 1: Write testbench scaffold with weight loading test**
 
 ```cpp
 #include <cstdio>
@@ -173,43 +182,48 @@ void tick(Vmac_unit* dut, VerilatedVcdC* tfp) {
 void reset(Vmac_unit* dut, VerilatedVcdC* tfp) {
     dut->rst_n = 0;
     dut->enable = 0;
-    dut->clear_acc = 0;
+    dut->load_weight = 0;
     dut->a = 0;
     dut->b = 0;
+    dut->psum_in = 0;
     tick(dut, tfp);
     tick(dut, tfp);
     dut->rst_n = 1;
     tick(dut, tfp);
 }
 
-// Test 1: a_out and b_out appear exactly 1 cycle after a and b
-void test_passthrough_timing(Vmac_unit* dut, VerilatedVcdC* tfp) {
-    printf("Test: passthrough timing\n");
+// Test 1: load a weight, verify it persists during compute
+void test_weight_loading(Vmac_unit* dut, VerilatedVcdC* tfp) {
+    printf("Test: weight loading\n");
     reset(dut, tfp);
 
+    // Load weight = 42
     dut->enable = 1;
-    dut->a = 42;
-    dut->b = 7;
-
-    // Before the clock edge, outputs should still be 0 (from reset)
-    CHECK(dut->a_out == 0, "a_out should be 0 before first tick");
-    CHECK(dut->b_out == 0, "b_out should be 0 before first tick");
-
+    dut->load_weight = 1;
+    dut->b = 42;
     tick(dut, tfp);
 
-    // After 1 cycle, a_out and b_out should reflect the inputs
-    CHECK(dut->a_out == 42, "a_out should be 42, got %d", dut->a_out);
-    CHECK(dut->b_out == 7,  "b_out should be 7, got %d", dut->b_out);
-
-    // Change inputs and verify old values persist until next tick
-    dut->a = 100;
-    dut->b = 200;
-    // a_out/b_out still hold previous values (registered)
-    CHECK(dut->a_out == 42, "a_out should still be 42 before tick");
-
+    // Switch to compute mode, change b — weight should persist
+    dut->load_weight = 0;
+    dut->b = 99;  // Should be ignored by weight_reg
+    dut->a = 3;
     tick(dut, tfp);
-    CHECK(dut->a_out == 100, "a_out should be 100, got %d", dut->a_out);
-    CHECK(dut->b_out == 200, "b_out should be 200, got %d", dut->b_out);
+    // Stage 1: mult_reg = 3 * 42 = 126
+
+    dut->a = 0;
+    tick(dut, tfp);
+    // Stage 2: psum_out = 0 + 126 = 126
+
+    CHECK(dut->psum_out == 126, "weight should persist: expected psum_out=126, got %d", dut->psum_out);
+
+    // Feed another activation — weight should still be 42
+    dut->a = 2;
+    tick(dut, tfp);
+    // Stage 1: mult_reg = 2 * 42 = 84
+    tick(dut, tfp);
+    // Stage 2: psum_out = 0 + 84 = 84 (psum_in is still 0)
+
+    CHECK(dut->psum_out == 84, "weight still 42: expected psum_out=84, got %d", dut->psum_out);
 }
 
 int main(int argc, char** argv) {
@@ -219,10 +233,12 @@ int main(int argc, char** argv) {
     Vmac_unit* dut = new Vmac_unit;
     VerilatedVcdC* tfp = new VerilatedVcdC;
     dut->trace(tfp, 99);
-    system("mkdir -p waves");
+    if (system("mkdir -p waves") != 0) {
+        fprintf(stderr, "Warning: could not create waves/ directory\n");
+    }
     tfp->open("waves/mac_unit.vcd");
 
-    test_passthrough_timing(dut, tfp);
+    test_weight_loading(dut, tfp);
 
     tfp->close();
     delete tfp;
@@ -246,395 +262,290 @@ Expected: Compiles cleanly, test passes, `waves/mac_unit.vcd` created.
 
 ```bash
 git add tb/tb_mac_unit.cpp
-git commit -m "add MAC testbench with passthrough timing test"
+git commit -m "add MAC testbench with weight loading test"
 ```
 
 ---
 
-### Task 4: Basic Accumulation Test
+### Task 4: Multiply + Passthrough Timing Test
 
 **Files:**
 - Modify: `tb/tb_mac_unit.cpp`
 
-Feed 4 `(a, b)` pairs with `clear_acc=0`, wait for pipeline drain (2 cycles after last input), verify `result` equals the sum of products.
-
-- [ ] **Step 1: Add accumulation test function**
-
-Add before `main()`:
+- [ ] **Step 1: Add passthrough timing test**
 
 ```cpp
-// Test 2: feed 4 (a,b) pairs, verify sum-of-products
-void test_basic_accumulation(Vmac_unit* dut, VerilatedVcdC* tfp) {
-    printf("Test: basic accumulation\n");
+// Test 2: a_out appears 1 cycle after a, mult_reg uses stored weight
+void test_passthrough_timing(Vmac_unit* dut, VerilatedVcdC* tfp) {
+    printf("Test: passthrough timing\n");
     reset(dut, tfp);
 
+    // Load weight = 5
     dut->enable = 1;
-    dut->clear_acc = 1;  // Clear on first product
-
-    // Pair 0: 3 * 4 = 12
-    dut->a = 3; dut->b = 4;
+    dut->load_weight = 1;
+    dut->b = 5;
     tick(dut, tfp);
+    dut->load_weight = 0;
 
-    // After this tick: Stage 1 latched mult_reg = 12.
-    // Stage 2 saw clear_acc=1 and loaded old mult_reg (0 from reset), so acc_reg = 0.
-    dut->clear_acc = 0;  // Accumulate from now on
-
-    // Pair 1: 5 * 6 = 30
-    dut->a = 5; dut->b = 6;
+    // Feed activation = 7
+    dut->a = 7;
+    CHECK(dut->a_out == 0, "a_out should be 0 before tick");
     tick(dut, tfp);
-    // Now: mult_reg = 30, acc_reg = 0 + 12 = 12 (via accumulation, clear_acc is now 0)
+    CHECK(dut->a_out == 7, "a_out should be 7, got %d", dut->a_out);
 
-    // Pair 2: 2 * 7 = 14
-    dut->a = 2; dut->b = 7;
+    // Change activation, verify old a_out persists until next tick
+    dut->a = 100;
+    CHECK(dut->a_out == 7, "a_out should still be 7 before tick");
     tick(dut, tfp);
-    // Now: mult_reg = 14, acc_reg = 12 + 30 = 42
-
-    // Pair 3: 1 * 8 = 8
-    dut->a = 1; dut->b = 8;
-    tick(dut, tfp);
-    // Now: mult_reg = 8, acc_reg = 42 + 14 = 56
-
-    // Drain: one more tick for last mult_reg to accumulate
-    dut->a = 0; dut->b = 0;
-    tick(dut, tfp);
-    // Now: mult_reg = 0, acc_reg = 56 + 8 = 64
-
-    // One more tick so the zero product doesn't pollute — actually we need to
-    // stop enable or accept that acc will add 0. Adding 0 is fine.
-    tick(dut, tfp);
-    // acc_reg = 64 + 0 = 64
-
-    // Expected: 3*4 + 5*6 + 2*7 + 1*8 = 12 + 30 + 14 + 8 = 64
-    CHECK(dut->result == 64, "accumulation expected 64, got %d", dut->result);
+    CHECK(dut->a_out == 100, "a_out should be 100, got %d", dut->a_out);
 }
 ```
 
-- [ ] **Step 2: Add call in `main()` before `tfp->close()`**
-
-```cpp
-    test_basic_accumulation(dut, tfp);
-```
-
-- [ ] **Step 3: Build and run**
-
-Run: `make sim_mac`
-Expected: Both tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add basic accumulation test for MAC unit"
-```
+- [ ] **Step 2: Add call in `main()`, build and run**
+- [ ] **Step 3: Commit**
 
 ---
 
-### Task 5: Reset Test
+### Task 5: Partial Sum Chain Test
 
 **Files:**
 - Modify: `tb/tb_mac_unit.cpp`
 
-Assert `rst_n` low mid-accumulation, verify all registers clear to zero.
-
-- [ ] **Step 1: Add reset test function**
-
-Add before `main()`:
+- [ ] **Step 1: Add partial sum chain test**
 
 ```cpp
-// Test 3: assert rst_n low, verify accumulator and passthrough clear to zero
+// Test 3: psum_out = psum_in + a * weight, with varying psum_in
+void test_partial_sum_chain(Vmac_unit* dut, VerilatedVcdC* tfp) {
+    printf("Test: partial sum chain\n");
+    reset(dut, tfp);
+
+    // Load weight = 10
+    dut->enable = 1;
+    dut->load_weight = 1;
+    dut->b = 10;
+    tick(dut, tfp);
+    dut->load_weight = 0;
+
+    // Feed a=3 with psum_in=100
+    dut->a = 3;
+    dut->psum_in = 100;
+    tick(dut, tfp);
+    // Stage 1: mult_reg = 3*10 = 30
+
+    tick(dut, tfp);
+    // Stage 2: psum_out = 100 + 30 = 130
+    // Note: psum_in is still 100 at this point
+
+    CHECK(dut->psum_out == 130, "psum chain: expected 130, got %d", dut->psum_out);
+
+    // Change psum_in to simulate different partial sum from above
+    dut->a = 5;
+    dut->psum_in = 200;
+    tick(dut, tfp);
+    // Stage 1: mult_reg = 5*10 = 50
+
+    tick(dut, tfp);
+    // Stage 2: psum_out = 200 + 50 = 250
+
+    CHECK(dut->psum_out == 250, "psum chain: expected 250, got %d", dut->psum_out);
+}
+```
+
+- [ ] **Step 2: Add call in `main()`, build and run**
+- [ ] **Step 3: Commit**
+
+---
+
+### Task 6: Weight Loading Chain (b_out) Test
+
+**Files:**
+- Modify: `tb/tb_mac_unit.cpp`
+
+- [ ] **Step 1: Add weight loading chain test**
+
+```cpp
+// Test 4: b_out passes weights through for column loading
+void test_weight_chain(Vmac_unit* dut, VerilatedVcdC* tfp) {
+    printf("Test: weight loading chain\n");
+    reset(dut, tfp);
+
+    dut->enable = 1;
+    dut->load_weight = 1;
+
+    // Feed weight value through b, verify b_out passes it 1 cycle later
+    dut->b = 55;
+    tick(dut, tfp);
+    CHECK(dut->b_out == 55, "b_out should pass 55, got %d", dut->b_out);
+
+    // Next weight value
+    dut->b = 77;
+    tick(dut, tfp);
+    CHECK(dut->b_out == 77, "b_out should pass 77, got %d", dut->b_out);
+
+    // After loading, b_out should still pass through (but b_in will be 0 during compute)
+    dut->load_weight = 0;
+    dut->b = 0;
+    tick(dut, tfp);
+    CHECK(dut->b_out == 0, "b_out should be 0 during compute, got %d", dut->b_out);
+}
+```
+
+- [ ] **Step 2: Add call in `main()`, build and run**
+- [ ] **Step 3: Commit**
+
+---
+
+### Task 7: Reset Test
+
+**Files:**
+- Modify: `tb/tb_mac_unit.cpp`
+
+- [ ] **Step 1: Add reset test**
+
+```cpp
+// Test 5: assert rst_n low, verify all registers clear to zero
 void test_reset(Vmac_unit* dut, VerilatedVcdC* tfp) {
     printf("Test: reset behavior\n");
     reset(dut, tfp);
 
+    // Build up nonzero state
     dut->enable = 1;
-    dut->clear_acc = 1;
-
-    // Feed some values to get nonzero state
-    dut->a = 10; dut->b = 20;
-    tick(dut, tfp);          // Stage 1: mult_reg = 200. Stage 2: clear_acc=1, loads old mult_reg (0) → acc_reg = 0
-    dut->clear_acc = 0;
-    tick(dut, tfp);          // Stage 1: mult_reg = 200. Stage 2: acc_reg = 0 + 200 = 200
-    CHECK(dut->result == 200, "pre-reset: expected 200, got %d", dut->result);
+    dut->load_weight = 1;
+    dut->b = 10;
+    tick(dut, tfp);
+    dut->load_weight = 0;
+    dut->a = 5;
+    dut->psum_in = 100;
+    tick(dut, tfp);
+    tick(dut, tfp);
 
     // Assert reset
     dut->rst_n = 0;
     tick(dut, tfp);
 
-    CHECK(dut->result == 0, "after reset: result should be 0, got %d", dut->result);
-    CHECK(dut->a_out == 0,  "after reset: a_out should be 0, got %d", dut->a_out);
-    CHECK(dut->b_out == 0,  "after reset: b_out should be 0, got %d", dut->b_out);
+    CHECK(dut->psum_out == 0, "after reset: psum_out should be 0, got %d", dut->psum_out);
+    CHECK(dut->a_out == 0, "after reset: a_out should be 0, got %d", dut->a_out);
+    CHECK(dut->b_out == 0, "after reset: b_out should be 0, got %d", dut->b_out);
 
-    // Release reset
+    // Release reset, verify weight_reg is also cleared
     dut->rst_n = 1;
+    dut->a = 7;
+    dut->psum_in = 0;
     tick(dut, tfp);
-    CHECK(dut->result == 0, "after reset release: result should still be 0, got %d", dut->result);
+    // mult_reg = 7 * 0 (weight_reg cleared) = 0
+    tick(dut, tfp);
+    CHECK(dut->psum_out == 0, "after reset: weight should be 0, psum_out should be 0, got %d", dut->psum_out);
 }
 ```
 
-- [ ] **Step 2: Add call in `main()`**
-
-- [ ] **Step 3: Build and run**
-
-Run: `make sim_mac`
-Expected: All 3 tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add reset behavior test for MAC unit"
-```
+- [ ] **Step 2: Add call in `main()`, build and run**
+- [ ] **Step 3: Commit**
 
 ---
 
-### Task 6: Clear-Acc Mid-Stream Test
+### Task 8: Enable Stall Test
 
 **Files:**
 - Modify: `tb/tb_mac_unit.cpp`
 
-Accumulate some products, assert `clear_acc` between two sequences, verify the first sequence's result is discarded and only the second sequence's result remains.
-
-- [ ] **Step 1: Add clear_acc test function**
-
-Add before `main()`:
+- [ ] **Step 1: Add enable stall test**
 
 ```cpp
-// Test 4: clear_acc between two accumulation sequences
-void test_clear_midstream(Vmac_unit* dut, VerilatedVcdC* tfp) {
-    printf("Test: clear_acc mid-stream\n");
-    reset(dut, tfp);
-
-    dut->enable = 1;
-    dut->clear_acc = 1;
-
-    // Sequence 1: 10*10 + 20*20 = 100 + 400 = 500
-    dut->a = 10; dut->b = 10;
-    tick(dut, tfp);          // mult_reg = 100
-    dut->clear_acc = 0;
-    dut->a = 20; dut->b = 20;
-    tick(dut, tfp);          // mult_reg = 400, acc_reg = 100
-    dut->a = 0; dut->b = 0;
-    tick(dut, tfp);          // mult_reg = 0, acc_reg = 100 + 400 = 500
-    tick(dut, tfp);          // acc_reg = 500 + 0 = 500
-    CHECK(dut->result == 500, "seq1: expected 500, got %d", dut->result);
-
-    // Assert clear_acc to start sequence 2
-    dut->clear_acc = 1;
-    dut->a = 3; dut->b = 3;
-    tick(dut, tfp);          // Stage 1: mult_reg = 9. Stage 2: clear_acc=1, loads old mult_reg (0) → acc_reg = 0
-    dut->clear_acc = 0;
-    dut->a = 4; dut->b = 4;
-    tick(dut, tfp);          // mult_reg = 16, acc_reg = 0 + 9 = 9
-    dut->a = 0; dut->b = 0;
-    tick(dut, tfp);          // mult_reg = 0, acc_reg = 9 + 16 = 25
-    tick(dut, tfp);          // acc_reg = 25 + 0 = 25
-
-    // Sequence 2 result: 3*3 + 4*4 = 9 + 16 = 25
-    CHECK(dut->result == 25, "seq2: expected 25, got %d", dut->result);
-}
-```
-
-- [ ] **Step 2: Add call in `main()`**
-
-- [ ] **Step 3: Build and run**
-
-Run: `make sim_mac`
-Expected: All 4 tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add clear_acc mid-stream test for MAC unit"
-```
-
----
-
-### Task 7: Boundary / Overflow Test
-
-**Files:**
-- Modify: `tb/tb_mac_unit.cpp`
-
-Feed max-value signed 16-bit inputs and verify the 32-bit accumulator handles the product correctly.
-
-- [ ] **Step 1: Add boundary test function**
-
-Add before `main()`:
-
-```cpp
-// Test 5: max-value inputs, verify signed multiplication and accumulator width
-void test_boundary(Vmac_unit* dut, VerilatedVcdC* tfp) {
-    printf("Test: boundary values\n");
-    reset(dut, tfp);
-
-    dut->enable = 1;
-    dut->clear_acc = 1;
-
-    // Max positive * max positive: 32767 * 32767 = 1,073,676,289
-    // This fits in int32 (max 2,147,483,647)
-    dut->a = 0x7FFF;  // 32767 as signed 16-bit
-    dut->b = 0x7FFF;
-    tick(dut, tfp);    // Stage 1: mult_reg = 1,073,676,289. Stage 2: clear_acc=1, loads old mult_reg (0) → acc_reg = 0
-    dut->clear_acc = 0;
-
-    // Max negative * max positive: -32768 * 32767 = -1,073,709,056
-    dut->a = 0x8000;  // -32768 as signed 16-bit
-    dut->b = 0x7FFF;  // 32767
-    tick(dut, tfp);    // acc_reg = 0 + 1,073,676,289 = 1,073,676,289
-
-    dut->a = 0; dut->b = 0;
-    tick(dut, tfp);    // acc_reg = 1,073,676,289 + (-1,073,709,056) = -32,767
-    tick(dut, tfp);    // drain
-
-    // 32767*32767 + (-32768)*32767 = 32767*(32767 - 32768) = 32767*(-1) = -32767
-    int32_t expected = -32767;
-    int32_t got = (int32_t)dut->result;
-    CHECK(got == expected, "boundary: expected %d, got %d", expected, got);
-}
-```
-
-- [ ] **Step 2: Add call in `main()`**
-
-- [ ] **Step 3: Build and run**
-
-Run: `make sim_mac`
-Expected: All 5 tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add boundary value test for MAC unit"
-```
-
----
-
-### Task 8: Enable-Stall Test
-
-**Files:**
-- Modify: `tb/tb_mac_unit.cpp`
-
-Verify that when `enable=0`, all registers hold their values — the pipeline freezes completely.
-
-- [ ] **Step 1: Add enable-stall test function**
-
-Add before `main()`:
-
-```cpp
-// Test 6: enable=0 freezes all pipeline registers
+// Test 6: enable=0 freezes all registers including weight_reg
 void test_enable_stall(Vmac_unit* dut, VerilatedVcdC* tfp) {
     printf("Test: enable stall\n");
     reset(dut, tfp);
 
+    // Load weight and build state
     dut->enable = 1;
-    dut->clear_acc = 1;
+    dut->load_weight = 1;
+    dut->b = 8;
+    tick(dut, tfp);
+    dut->load_weight = 0;
+    dut->a = 3;
+    dut->psum_in = 50;
+    tick(dut, tfp);
+    // mult_reg = 3*8 = 24
+    tick(dut, tfp);
+    // psum_out = 50 + 24 = 74
 
-    // Get some nonzero state: feed 5*6, let it accumulate
-    dut->a = 5; dut->b = 6;
-    tick(dut, tfp);          // mult_reg = 30, acc_reg = 0 (clear loaded old mult_reg=0)
-    dut->clear_acc = 0;
-    tick(dut, tfp);          // mult_reg = 30, acc_reg = 0 + 30 = 30
+    CHECK(dut->psum_out == 74, "pre-stall: expected 74, got %d", dut->psum_out);
 
-    // Freeze the pipeline
+    // Freeze pipeline
     dut->enable = 0;
-    dut->a = 99; dut->b = 99;  // These should be ignored
-
+    dut->a = 99;
+    dut->psum_in = 999;
     tick(dut, tfp);
     tick(dut, tfp);
     tick(dut, tfp);
 
-    // Everything should still hold the pre-freeze values
-    CHECK(dut->result == 30, "stall: result should still be 30, got %d", dut->result);
-    CHECK(dut->a_out == 5,   "stall: a_out should still be 5, got %d", dut->a_out);
-    CHECK(dut->b_out == 6,   "stall: b_out should still be 6, got %d", dut->b_out);
+    CHECK(dut->psum_out == 74, "stall: psum_out should still be 74, got %d", dut->psum_out);
+    CHECK(dut->a_out == 3, "stall: a_out should still be 3, got %d", dut->a_out);
 
-    // Resume and verify pipeline works again
+    // Resume
     dut->enable = 1;
-    dut->a = 2; dut->b = 3;
-    tick(dut, tfp);          // mult_reg = 6, acc_reg = 30 + 30 = 60 (old mult_reg=30 still in pipeline)
-    dut->a = 0; dut->b = 0;
-    tick(dut, tfp);          // mult_reg = 0, acc_reg = 60 + 6 = 66
-    tick(dut, tfp);          // drain: acc_reg = 66 + 0 = 66
-    CHECK(dut->result == 66, "resume: expected 66, got %d", dut->result);
+    dut->a = 2;
+    dut->psum_in = 0;
+    tick(dut, tfp);
+    // mult_reg = 2*8 = 16 (weight still 8)
+    tick(dut, tfp);
+    // psum_out = 0 + 16 = 16
+
+    CHECK(dut->psum_out == 16, "resume: expected 16, got %d", dut->psum_out);
 }
 ```
 
-- [ ] **Step 2: Add call in `main()`**
-
-- [ ] **Step 3: Build and run**
-
-Run: `make sim_mac`
-Expected: All 6 tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add enable-stall test for MAC unit"
-```
+- [ ] **Step 2: Add call in `main()`, build and run**
+- [ ] **Step 3: Commit**
 
 ---
 
-### Task 9: Negative Accumulation Test
+### Task 9: Signed Values Test
 
 **Files:**
 - Modify: `tb/tb_mac_unit.cpp`
 
-Verify signed accumulation across multiple pairs with negative intermediate products.
-
-- [ ] **Step 1: Add negative accumulation test function**
-
-Add before `main()`:
+- [ ] **Step 1: Add signed values test**
 
 ```cpp
-// Test 7: signed accumulation with negative products
-void test_negative_accumulation(Vmac_unit* dut, VerilatedVcdC* tfp) {
-    printf("Test: negative accumulation\n");
+// Test 7: negative activations and weights
+void test_signed_values(Vmac_unit* dut, VerilatedVcdC* tfp) {
+    printf("Test: signed values\n");
     reset(dut, tfp);
 
+    // Load negative weight: -5
     dut->enable = 1;
-    dut->clear_acc = 1;
+    dut->load_weight = 1;
+    dut->b = (uint16_t)(int16_t)-5;  // 0xFFFB
+    tick(dut, tfp);
+    dut->load_weight = 0;
 
-    // (-3) * 4 = -12
+    // Positive activation * negative weight: 10 * (-5) = -50
+    dut->a = 10;
+    dut->psum_in = 100;
+    tick(dut, tfp);
+    // mult_reg = -50
+    tick(dut, tfp);
+    // psum_out = 100 + (-50) = 50
+
+    int32_t got = (int32_t)dut->psum_out;
+    CHECK(got == 50, "signed: expected 50, got %d", got);
+
+    // Negative activation * negative weight: (-3) * (-5) = 15
     dut->a = (uint16_t)(int16_t)-3;  // 0xFFFD
-    dut->b = 4;
-    tick(dut, tfp);          // mult_reg = -12, acc_reg = 0 (clear loaded old mult_reg=0)
-    dut->clear_acc = 0;
+    dut->psum_in = 0;
+    tick(dut, tfp);
+    // mult_reg = 15
+    tick(dut, tfp);
+    // psum_out = 0 + 15 = 15
 
-    // 5 * (-6) = -30
-    dut->a = 5;
-    dut->b = (uint16_t)(int16_t)-6;  // 0xFFFA
-    tick(dut, tfp);          // mult_reg = -30, acc_reg = 0 + (-12) = -12
-
-    // (-7) * (-8) = 56
-    dut->a = (uint16_t)(int16_t)-7;  // 0xFFF9
-    dut->b = (uint16_t)(int16_t)-8;  // 0xFFF8
-    tick(dut, tfp);          // mult_reg = 56, acc_reg = -12 + (-30) = -42
-
-    dut->a = 0; dut->b = 0;
-    tick(dut, tfp);          // mult_reg = 0, acc_reg = -42 + 56 = 14
-    tick(dut, tfp);          // drain: acc_reg = 14 + 0 = 14
-
-    // Expected: (-3)*4 + 5*(-6) + (-7)*(-8) = -12 + (-30) + 56 = 14
-    int32_t expected = 14;
-    int32_t got = (int32_t)dut->result;
-    CHECK(got == expected, "negative accum: expected %d, got %d", expected, got);
+    got = (int32_t)dut->psum_out;
+    CHECK(got == 15, "neg*neg: expected 15, got %d", got);
 }
 ```
 
-- [ ] **Step 2: Add call in `main()`**
-
-- [ ] **Step 3: Build and run**
-
-Run: `make sim_mac`
-Expected: All 7 tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add negative accumulation test for MAC unit"
-```
+- [ ] **Step 2: Add call in `main()`, build and run**
+- [ ] **Step 3: Commit**
 
 ---
 
@@ -656,10 +567,11 @@ ls -la waves/mac_unit.vcd
 ```
 
 The waveform should show:
-- `mult_reg` updates 1 cycle after `a`/`b` change
-- `acc_reg` updates 1 cycle after `mult_reg` changes
+- `weight_reg` latches on `load_weight` posedge, holds steady during compute
+- `mult_reg` updates 1 cycle after activation arrives
+- `psum_out` updates 1 cycle after `mult_reg` (= 2 cycles after activation)
 - `a_out`/`b_out` update on the same cycle as `mult_reg` (both stage 1)
 
 - [ ] **Step 3: Final commit (if any cleanup needed)**
 
-Milestone 1 is complete when all 7 test cases pass and the VCD waveform confirms 2-stage pipeline timing.
+Milestone 1 is complete when all 7 test cases pass and the VCD waveform confirms weight-stationary 2-stage pipeline timing.

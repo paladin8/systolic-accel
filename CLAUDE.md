@@ -40,10 +40,10 @@ make sim_top       # M4
 
 ## Key design details
 
-- **Weight-stationary dataflow** — weights loaded via top-edge `b_in`, activations stream from left-edge `a_in`
-- **2-stage MAC pipeline** — stage 1: multiply + register passthrough; stage 2: accumulate
-- **Input skewing** — row `i` delayed by `i` cycles, column `j` delayed by `j` cycles
-- **Timing** — first valid output at cycle `N + N + 1`, all results valid after cycle `3N`
+- **Weight-stationary dataflow (TPU-style)** — weights pre-loaded into MACs, activations stream left-to-right, partial sums flow top-to-bottom
+- **2-stage MAC pipeline** — stage 1: multiply activation * stored weight + passthrough; stage 2: add partial sum
+- **Input skewing** — row `k` activation delayed by `k` cycles (no column skewing — weights are pre-loaded)
+- **Timing** — weight load: N cycles; compute: C[m][j] at drain_out[j] at cycle N+m+j from compute start
 - Default params: `DATA_WIDTH=16`, `ACC_WIDTH=32`, `ROWS=COLS=4`
 
 ## File conventions
@@ -51,3 +51,4 @@ make sim_top       # M4
 - RTL in `rtl/`, testbenches in `tb/`, synthesis scripts in `synth/`
 - Waveforms (`*.vcd`) and `obj_dir/` are gitignored
 - Testbenches are C++ (Verilator), reference model is Python
+- All specs, plans, and design docs go in `.ai/plans/` — never use `.superpowers/` or `docs/superpowers/`
