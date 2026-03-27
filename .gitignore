@@ -1,4 +1,7 @@
 waves/
 obj_dir/
+obj_dir_*/
 *.vcd
 .venv/
+synth/logs/
+synth/results.json

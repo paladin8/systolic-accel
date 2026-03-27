@@ -1,6 +1,7 @@
 module mac_unit #(
-    parameter DATA_WIDTH = 16,
-    parameter ACC_WIDTH  = 32
+    parameter DATA_WIDTH     = 16,
+    parameter ACC_WIDTH      = 32,
+    parameter PIPELINE_DEPTH = 2   // 1, 2, or 3
 )(
     input  logic                  clk,
     input  logic                  rst_n,
@@ -15,10 +16,9 @@ module mac_unit #(
 );
 
     logic [DATA_WIDTH-1:0] weight_reg;
-    logic [ACC_WIDTH-1:0]  mult_reg;
 
     // Weight register — loaded during weight phase, stationary during compute
-    // Synthesizes to: weight_reg[DATA_WIDTH] flip-flops
+    // Synthesizes to: DATA_WIDTH flip-flops
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             weight_reg <= '0;
@@ -26,27 +26,75 @@ module mac_unit #(
             weight_reg <= b;
     end
 
-    // Stage 1: registered multiplier output + passthrough
-    // Synthesizes to: mult_reg[ACC_WIDTH] + a_out[DATA_WIDTH] + b_out[DATA_WIDTH] flip-flops
+    // Passthrough registers — always stage 1, all depths
+    // Synthesizes to: 2 * DATA_WIDTH flip-flops
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            mult_reg <= '0;
-            a_out    <= '0;
-            b_out    <= '0;
+            a_out <= '0;
+            b_out <= '0;
         end else if (enable) begin
-            mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(weight_reg));
-            a_out    <= a;
-            b_out    <= b;
+            a_out <= a;
+            b_out <= b;
         end
     end
 
-    // Stage 2: partial sum addition
-    // Synthesizes to: psum_out[ACC_WIDTH] flip-flops
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            psum_out <= '0;
-        else if (enable)
-            psum_out <= psum_in + mult_reg;
-    end
+    generate
+        if (PIPELINE_DEPTH == 1) begin : gen_depth1
+            // Depth 1: combinational multiply-add, registered at psum_out
+            // Synthesizes to: ACC_WIDTH flip-flops (psum_out only)
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    psum_out <= '0;
+                else if (enable)
+                    psum_out <= psum_in + ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(weight_reg));
+            end
+
+        end else if (PIPELINE_DEPTH == 2) begin : gen_depth2
+            // Depth 2: register after multiply, then add
+            // Synthesizes to: mult_reg[ACC_WIDTH] + psum_out[ACC_WIDTH] flip-flops
+            logic [ACC_WIDTH-1:0] mult_reg;
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    mult_reg <= '0;
+                else if (enable)
+                    mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(weight_reg));
+            end
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    psum_out <= '0;
+                else if (enable)
+                    psum_out <= psum_in + mult_reg;
+            end
+
+        end else if (PIPELINE_DEPTH == 3) begin : gen_depth3
+            // Depth 3: register after multiply, register after add, then output
+            // Synthesizes to: mult_reg[ACC_WIDTH] + add_reg[ACC_WIDTH] + psum_out[ACC_WIDTH] flip-flops
+            logic [ACC_WIDTH-1:0] mult_reg;
+            logic [ACC_WIDTH-1:0] add_reg;
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    mult_reg <= '0;
+                else if (enable)
+                    mult_reg <= ACC_WIDTH'($signed(a)) * ACC_WIDTH'($signed(weight_reg));
+            end
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    add_reg <= '0;
+                else if (enable)
+                    add_reg <= psum_in + mult_reg;
+            end
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    psum_out <= '0;
+                else if (enable)
+                    psum_out <= add_reg;
+            end
+        end
+    endgenerate
 
 endmodule

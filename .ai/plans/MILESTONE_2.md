@@ -197,13 +197,6 @@ See reference model code above.
 Run: `uv run python tb/ref_matmul.py 4`
 Expected: `tb/test_vectors.txt` created with 4, then 4 rows of A, 4 rows of B, 4 rows of C.
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tb/ref_matmul.py
-git commit -m "add Python reference model for matrix multiply"
-```
-
 ---
 
 ### Task 2: Makefile Update
@@ -214,13 +207,6 @@ git commit -m "add Python reference model for matrix multiply"
 - [ ] **Step 1: Add `sim_array` target**
 
 Add `sim_array` to `.PHONY` and add the target.
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add Makefile
-git commit -m "add sim_array target to Makefile"
-```
 
 ---
 
@@ -254,13 +240,6 @@ Key implementation details:
 Run: `verilator --cc --trace -Wall -Wno-fatal rtl/mac_unit.sv rtl/systolic_array.sv`
 Expected: Clean compilation.
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add rtl/systolic_array.sv
-git commit -m "add systolic array RTL — weight-stationary with activation skewing"
-```
-
 ---
 
 ### Task 4: Testbench Scaffold + Identity Test
@@ -286,13 +265,6 @@ Scaffold includes:
 Run: `make sim_array`
 Expected: Identity test passes.
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tb/tb_systolic_array.cpp
-git commit -m "add systolic array testbench with identity multiply test"
-```
-
 ---
 
 ### Task 5: Single-Element and Zero Tests
@@ -313,13 +285,6 @@ A = arbitrary, B = 0. All results should be 0.
 Run: `make sim_array`
 Expected: All 3 tests pass.
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_systolic_array.cpp
-git commit -m "add single-element and zero matrix tests"
-```
-
 ---
 
 ### Task 6: Counting Matrix and Negative Values Tests
@@ -339,13 +304,6 @@ Hardcoded small matrices with mixed positive/negative entries and pre-computed e
 
 Run: `make sim_array`
 Expected: All 5 tests pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tb/tb_systolic_array.cpp
-git commit -m "add counting matrix and negative values tests"
-```
 
 ---
 
@@ -369,13 +327,6 @@ Key details:
 Run: `make sim_array`
 Expected: All 6 tests pass.
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tb/tb_systolic_array.cpp
-git commit -m "add weight reuse test — back-to-back matmul without reload"
-```
-
 ---
 
 ### Task 8: Timing Verification Test
@@ -397,13 +348,6 @@ This requires a manual tick loop that checks drain_out at intermediate cycles.
 Run: `make sim_array`
 Expected: All 7 tests pass.
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tb/tb_systolic_array.cpp
-git commit -m "add timing verification test for systolic array"
-```
-
 ---
 
 ### Task 9: Random Test (Python-Generated)
@@ -424,13 +368,6 @@ Parse `tb/test_vectors.txt`:
 Run: `make sim_array`
 Expected: All 8 tests pass (7 hardcoded + 1 file-loaded random).
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tb/tb_systolic_array.cpp
-git commit -m "add random matrix test with Python-generated vectors"
-```
-
 ---
 
 ### Task 10: Final Verification
@@ -450,7 +387,5 @@ make sim_mac
 ```
 
 Expected: All 7 M1 tests still pass.
-
-- [ ] **Step 3: Final commit (if any cleanup needed)**
 
 Milestone 2 is complete when all tests pass for both `sim_mac` and `sim_array`.

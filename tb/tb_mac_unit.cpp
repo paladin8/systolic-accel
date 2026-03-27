@@ -4,6 +4,11 @@
 #include "verilated.h"
 #include "verilated_vcd_c.h"
 
+// Pipeline depth: set via -CFLAGS "-DPIPELINE_DEPTH=N", defaults to 2
+#ifndef PIPELINE_DEPTH
+#define PIPELINE_DEPTH 2
+#endif
+
 static vluint64_t sim_time = 0;
 static int test_failures = 0;
 
@@ -17,6 +22,11 @@ void tick(Vmac_unit* dut, VerilatedVcdC* tfp) {
     dut->clk = 1;
     dut->eval();
     tfp->dump(sim_time++);
+}
+
+void tick_n(Vmac_unit* dut, VerilatedVcdC* tfp, int n) {
+    for (int i = 0; i < n; i++)
+        tick(dut, tfp);
 }
 
 void reset(Vmac_unit* dut, VerilatedVcdC* tfp) {
@@ -47,26 +57,21 @@ void test_weight_loading(Vmac_unit* dut, VerilatedVcdC* tfp) {
     dut->load_weight = 0;
     dut->b = 99;  // Should be ignored by weight_reg
     dut->a = 3;
-    tick(dut, tfp);
-    // Stage 1: mult_reg = 3 * 42 = 126
-
-    dut->a = 0;
-    tick(dut, tfp);
-    // Stage 2: psum_out = 0 + 126 = 126
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // After PIPELINE_DEPTH ticks: psum_out = 0 + 3*42 = 126
 
     CHECK(dut->psum_out == 126, "weight should persist: expected psum_out=126, got %d", dut->psum_out);
 
     // Feed another activation — weight should still be 42
     dut->a = 2;
-    tick(dut, tfp);
-    // Stage 1: mult_reg = 2 * 42 = 84
-    tick(dut, tfp);
-    // Stage 2: psum_out = 0 + 84 = 84 (psum_in is still 0)
+    dut->psum_in = 0;
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // psum_out = 0 + 2*42 = 84
 
     CHECK(dut->psum_out == 84, "weight still 42: expected psum_out=84, got %d", dut->psum_out);
 }
 
-// Test 2: a_out appears 1 cycle after a, mult_reg uses stored weight
+// Test 2: a_out appears 1 cycle after a (passthrough timing is depth-independent)
 void test_passthrough_timing(Vmac_unit* dut, VerilatedVcdC* tfp) {
     printf("Test: passthrough timing\n");
     reset(dut, tfp);
@@ -106,27 +111,21 @@ void test_partial_sum_chain(Vmac_unit* dut, VerilatedVcdC* tfp) {
     // Feed a=3 with psum_in=100
     dut->a = 3;
     dut->psum_in = 100;
-    tick(dut, tfp);
-    // Stage 1: mult_reg = 3*10 = 30
-
-    tick(dut, tfp);
-    // Stage 2: psum_out = 100 + 30 = 130 (psum_in still 100)
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // psum_out = 100 + 3*10 = 130
 
     CHECK(dut->psum_out == 130, "psum chain: expected 130, got %d", dut->psum_out);
 
     // Change psum_in to simulate different partial sum from above
     dut->a = 5;
     dut->psum_in = 200;
-    tick(dut, tfp);
-    // Stage 1: mult_reg = 5*10 = 50
-
-    tick(dut, tfp);
-    // Stage 2: psum_out = 200 + 50 = 250
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // psum_out = 200 + 5*10 = 250
 
     CHECK(dut->psum_out == 250, "psum chain: expected 250, got %d", dut->psum_out);
 }
 
-// Test 4: b_out passes weights through for column loading
+// Test 4: b_out passes weights through for column loading (depth-independent)
 void test_weight_chain(Vmac_unit* dut, VerilatedVcdC* tfp) {
     printf("Test: weight loading chain\n");
     reset(dut, tfp);
@@ -164,8 +163,7 @@ void test_reset(Vmac_unit* dut, VerilatedVcdC* tfp) {
     dut->load_weight = 0;
     dut->a = 5;
     dut->psum_in = 100;
-    tick(dut, tfp);
-    tick(dut, tfp);
+    tick_n(dut, tfp, PIPELINE_DEPTH);
 
     // Assert reset
     dut->rst_n = 0;
@@ -177,11 +175,11 @@ void test_reset(Vmac_unit* dut, VerilatedVcdC* tfp) {
 
     // Release reset, verify weight_reg is also cleared
     dut->rst_n = 1;
+    dut->enable = 1;
     dut->a = 7;
     dut->psum_in = 0;
-    tick(dut, tfp);
-    // mult_reg = 7 * 0 (weight_reg cleared) = 0
-    tick(dut, tfp);
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // weight_reg = 0, so mult = 7*0 = 0, psum_out = 0+0 = 0
     CHECK(dut->psum_out == 0, "after reset: weight should be 0, psum_out should be 0, got %d", dut->psum_out);
 }
 
@@ -198,10 +196,8 @@ void test_enable_stall(Vmac_unit* dut, VerilatedVcdC* tfp) {
     dut->load_weight = 0;
     dut->a = 3;
     dut->psum_in = 50;
-    tick(dut, tfp);
-    // mult_reg = 3*8 = 24
-    tick(dut, tfp);
-    // psum_out = 50 + 24 = 74
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // psum_out = 50 + 3*8 = 74
 
     CHECK(dut->psum_out == 74, "pre-stall: expected 74, got %d", dut->psum_out);
 
@@ -220,10 +216,8 @@ void test_enable_stall(Vmac_unit* dut, VerilatedVcdC* tfp) {
     dut->enable = 1;
     dut->a = 2;
     dut->psum_in = 0;
-    tick(dut, tfp);
-    // Stage 1: mult_reg = 2*8 = 16 (weight still 8)
-    tick(dut, tfp);
-    // Stage 2: psum_out = 0 + 16 = 16
+    tick_n(dut, tfp, PIPELINE_DEPTH);
+    // psum_out = 0 + 2*8 = 16
 
     CHECK(dut->psum_out == 16, "resume: expected 16, got %d", dut->psum_out);
 }
@@ -243,9 +237,7 @@ void test_signed_values(Vmac_unit* dut, VerilatedVcdC* tfp) {
     // Positive activation * negative weight: 10 * (-5) = -50
     dut->a = 10;
     dut->psum_in = 100;
-    tick(dut, tfp);
-    // mult_reg = -50
-    tick(dut, tfp);
+    tick_n(dut, tfp, PIPELINE_DEPTH);
     // psum_out = 100 + (-50) = 50
 
     int32_t got = (int32_t)dut->psum_out;
@@ -254,9 +246,7 @@ void test_signed_values(Vmac_unit* dut, VerilatedVcdC* tfp) {
     // Negative activation * negative weight: (-3) * (-5) = 15
     dut->a = (uint16_t)(int16_t)-3;  // 0xFFFD
     dut->psum_in = 0;
-    tick(dut, tfp);
-    // mult_reg = 15
-    tick(dut, tfp);
+    tick_n(dut, tfp, PIPELINE_DEPTH);
     // psum_out = 0 + 15 = 15
 
     got = (int32_t)dut->psum_out;
@@ -275,6 +265,7 @@ int main(int argc, char** argv) {
     }
     tfp->open("waves/mac_unit.vcd");
 
+    printf("Pipeline depth: %d\n", PIPELINE_DEPTH);
     test_weight_loading(dut, tfp);
     test_passthrough_timing(dut, tfp);
     test_partial_sum_chain(dut, tfp);

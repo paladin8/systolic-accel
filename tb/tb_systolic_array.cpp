@@ -6,11 +6,39 @@
 #include "verilated_vcd_c.h"
 
 static const int N = 4;
+static const int DW = 16;  // DATA_WIDTH
+static const int AW = 32;  // ACC_WIDTH
 static vluint64_t sim_time = 0;
 static int test_failures = 0;
 
+// Pipeline depth: set via -CFLAGS "-DPIPELINE_DEPTH=N", defaults to 2
+#ifndef PIPELINE_DEPTH
+#define PIPELINE_DEPTH 2
+#endif
+
+// Base offset for drain timing: C[m][j] valid at compute tick base+m+j
+// Derivation: activation reaches MAC[k][j] at cycle m+k+j. With D-cycle MAC,
+// psum propagates 1 cycle per row (limited by activation stagger). The column
+// of N MACs adds N-1 cycles after the first MAC's output. First MAC output
+// at cycle j + PIPELINE_DEPTH. So C[m][j] at cycle m + j + N + PIPELINE_DEPTH - 2.
+static const int DRAIN_BASE = N + PIPELINE_DEPTH - 2;
+
 #define CHECK(cond, fmt, ...) \
     do { if (!(cond)) { printf("FAIL [%lu]: " fmt "\n", sim_time, ##__VA_ARGS__); test_failures++; } } while(0)
+
+// Pack N int16 values into a flat bit vector
+uint64_t pack_row(int16_t vals[N]) {
+    uint64_t flat = 0;
+    for (int i = 0; i < N; i++)
+        flat |= ((uint64_t)(uint16_t)vals[i]) << (i * DW);
+    return flat;
+}
+
+// Extract int32 result from drain_out at position j
+int32_t extract_drain(Vsystolic_array* dut, int j) {
+    // drain_out is COLS*ACC_WIDTH = 128 bits, stored as WData array of uint32_t
+    return (int32_t)dut->drain_out[j];
+}
 
 void tick(Vsystolic_array* dut, VerilatedVcdC* tfp) {
     dut->clk = 0;
@@ -25,10 +53,8 @@ void reset(Vsystolic_array* dut, VerilatedVcdC* tfp) {
     dut->rst_n = 0;
     dut->enable = 0;
     dut->load_weight = 0;
-    for (int i = 0; i < N; i++) {
-        dut->a_in[i] = 0;
-        dut->b_in[i] = 0;
-    }
+    dut->a_in = 0;
+    dut->b_in = 0;
     tick(dut, tfp);
     tick(dut, tfp);
     dut->rst_n = 1;
@@ -39,41 +65,37 @@ void reset(Vsystolic_array* dut, VerilatedVcdC* tfp) {
 void load_weights(Vsystolic_array* dut, VerilatedVcdC* tfp, int16_t B[N][N]) {
     dut->enable = 1;
     dut->load_weight = 1;
-    for (int i = 0; i < N; i++) dut->a_in[i] = 0;
+    dut->a_in = 0;
 
     for (int t = 0; t < N; t++) {
         int row = N - 1 - t;  // reverse order
-        for (int j = 0; j < N; j++)
-            dut->b_in[j] = (uint16_t)B[row][j];
+        dut->b_in = pack_row(B[row]);
         tick(dut, tfp);
     }
 
     dut->load_weight = 0;
-    for (int j = 0; j < N; j++) dut->b_in[j] = 0;
+    dut->b_in = 0;
 }
 
 // Feed activations and capture results from drain_out
-// C[m][j] valid at drain_out[j] after compute tick N+m+j
+// C[m][j] valid at drain_out after compute tick DRAIN_BASE+m+j
 void feed_and_capture(Vsystolic_array* dut, VerilatedVcdC* tfp,
                       int16_t A[N][N], int32_t result[N][N]) {
-    int total_ticks = N + 2 * (N - 1) + 1;  // 3N-2 + 1 for safety
+    int total_ticks = DRAIN_BASE + 2 * (N - 1) + 2;  // last capture + safety
 
     for (int t = 0; t < total_ticks; t++) {
-        // Feed activations for row t (if t < N)
-        for (int k = 0; k < N; k++) {
-            if (t < N)
-                dut->a_in[k] = (uint16_t)A[t][k];
-            else
-                dut->a_in[k] = 0;
-        }
+        if (t < N)
+            dut->a_in = pack_row(A[t]);
+        else
+            dut->a_in = 0;
 
         tick(dut, tfp);
 
-        // Capture results: C[m][j] valid after tick N+m+j
+        // Capture results: C[m][j] valid after tick DRAIN_BASE+m+j
         for (int m = 0; m < N; m++) {
             for (int j = 0; j < N; j++) {
-                if (t == N + m + j) {
-                    result[m][j] = (int32_t)dut->drain_out[j];
+                if (t == DRAIN_BASE + m + j) {
+                    result[m][j] = extract_drain(dut, j);
                 }
             }
         }
@@ -110,7 +132,6 @@ void test_identity(Vsystolic_array* dut, VerilatedVcdC* tfp) {
     };
     int32_t result[N][N] = {};
 
-    // A = identity
     for (int i = 0; i < N; i++) A[i][i] = 1;
 
     load_weights(dut, tfp, B);
@@ -174,7 +195,6 @@ void test_counting(Vsystolic_array* dut, VerilatedVcdC* tfp) {
 
     for (int i = 0; i < N; i++) B[i][i] = 1;
 
-    // A * I = A
     for (int i = 0; i < N; i++)
         for (int j = 0; j < N; j++)
             expected[i][j] = A[i][j];
@@ -201,8 +221,6 @@ void test_negative(Vsystolic_array* dut, VerilatedVcdC* tfp) {
         { 0,  0,  4,  0},
         { 0,  0,  0, -5}
     };
-    // C = A * diag(2, -3, 4, -5)
-    // C[i][j] = A[i][j] * B[j][j]
     int32_t expected[N][N] = {
         { 2,   6, 12,  20},
         {-10,-18,-28, -40},
@@ -228,7 +246,6 @@ void test_weight_reuse(Vsystolic_array* dut, VerilatedVcdC* tfp) {
         {0, 0, 0, 4}
     };
 
-    // A1 * diag(1,2,3,4) = column-scaled A1
     int16_t A1[N][N] = {
         {1, 1, 1, 1},
         {2, 2, 2, 2},
@@ -242,7 +259,6 @@ void test_weight_reuse(Vsystolic_array* dut, VerilatedVcdC* tfp) {
         {4, 8, 12, 16}
     };
 
-    // A2 * diag(1,2,3,4) = column-scaled A2
     int16_t A2[N][N] = {
         {10, 20, 30, 40},
         {-1, -2, -3, -4},
@@ -258,70 +274,64 @@ void test_weight_reuse(Vsystolic_array* dut, VerilatedVcdC* tfp) {
 
     int32_t result[N][N] = {};
 
-    // Load weights once
     load_weights(dut, tfp, B);
 
-    // First matmul
     feed_and_capture(dut, tfp, A1, result);
     check_results(result, expected1, "weight_reuse_1");
 
-    // Second matmul — NO reset, NO reload
     memset(result, 0, sizeof(result));
     feed_and_capture(dut, tfp, A2, result);
     check_results(result, expected2, "weight_reuse_2");
 }
 
-// Test 7: Verify pipeline timing — C[0][0] at cycle N, C[N-1][N-1] at cycle 3N-2
+// Test 7: Verify pipeline timing
+// C[0][0] at cycle DRAIN_BASE, C[N-1][N-1] at cycle DRAIN_BASE+2(N-1)
 void test_timing(Vsystolic_array* dut, VerilatedVcdC* tfp) {
     printf("Test: timing verification\n");
     reset(dut, tfp);
 
-    // Use counting matrices for known results
     int16_t A[N][N], B[N][N];
     int32_t expected[N][N];
     for (int i = 0; i < N; i++)
         for (int j = 0; j < N; j++) {
             A[i][j] = i * N + j + 1;
-            B[i][j] = (i == j) ? 1 : 0;  // identity
+            B[i][j] = (i == j) ? 1 : 0;
         }
-    // A * I = A
     for (int i = 0; i < N; i++)
         for (int j = 0; j < N; j++)
             expected[i][j] = A[i][j];
 
     load_weights(dut, tfp, B);
 
-    // Manual tick loop to check timing
-    int total_ticks = 3 * N;
+    int first_tick = DRAIN_BASE;                     // C[0][0]
+    int penult_tick = DRAIN_BASE + 2 * (N - 1) - 1; // C[N-2][N-1]
+    int last_tick = DRAIN_BASE + 2 * (N - 1);        // C[N-1][N-1]
+    int total_ticks = last_tick + 2;
+
     for (int t = 0; t < total_ticks; t++) {
-        for (int k = 0; k < N; k++) {
-            if (t < N)
-                dut->a_in[k] = (uint16_t)A[t][k];
-            else
-                dut->a_in[k] = 0;
-        }
+        if (t < N)
+            dut->a_in = pack_row(A[t]);
+        else
+            dut->a_in = 0;
 
         tick(dut, tfp);
 
-        // C[0][0] should be valid at tick N (= 4)
-        if (t == N) {
-            int32_t val = (int32_t)dut->drain_out[0];
+        if (t == first_tick) {
+            int32_t val = extract_drain(dut, 0);
             CHECK(val == expected[0][0],
                   "timing: C[0][0] at tick %d: expected %d, got %d",
                   t, expected[0][0], val);
         }
 
-        // At tick 3N-3 (=9), drain_out[N-1] should hold C[N-2][N-1], not C[N-1][N-1]
-        if (t == 3 * N - 3) {  // tick 9 = N + (N-2) + (N-1)
-            int32_t val = (int32_t)dut->drain_out[N - 1];
+        if (t == penult_tick) {
+            int32_t val = extract_drain(dut, N - 1);
             CHECK(val == expected[N-2][N-1],
                   "timing: drain_out[%d] at tick %d: expected C[%d][%d]=%d, got %d",
                   N-1, t, N-2, N-1, expected[N-2][N-1], val);
         }
 
-        // C[N-1][N-1] should be valid at tick 3N-2 (= 10)
-        if (t == 3 * N - 2) {
-            int32_t val = (int32_t)dut->drain_out[N - 1];
+        if (t == last_tick) {
+            int32_t val = extract_drain(dut, N - 1);
             CHECK(val == expected[N-1][N-1],
                   "timing: C[%d][%d] at tick %d: expected %d, got %d",
                   N-1, N-1, t, expected[N-1][N-1], val);
@@ -386,6 +396,7 @@ int main(int argc, char** argv) {
     }
     tfp->open("waves/systolic_array.vcd");
 
+    printf("Pipeline depth: %d, drain base: %d\n", PIPELINE_DEPTH, DRAIN_BASE);
     test_identity(dut, tfp);
     test_single_element(dut, tfp);
     test_zero_matrix(dut, tfp);

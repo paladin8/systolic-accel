@@ -43,13 +43,6 @@ clean:
 	rm -rf obj_dir waves/*.vcd
 ```
 
-- [ ] **Step 2: Commit**
-
-```bash
-git add Makefile
-git commit -m "add Makefile with sim_mac target"
-```
-
 ---
 
 ### Task 2: MAC Unit RTL
@@ -133,13 +126,6 @@ Key design decisions:
 
 Run: `verilator --cc --trace -Wall -Wno-fatal rtl/mac_unit.sv`
 Expected: Clean compilation, `obj_dir/` populated with generated C++ files.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add rtl/mac_unit.sv
-git commit -m "add MAC unit RTL — weight-stationary with partial sum flow"
-```
 
 ---
 
@@ -258,13 +244,6 @@ int main(int argc, char** argv) {
 Run: `make sim_mac`
 Expected: Compiles cleanly, test passes, `waves/mac_unit.vcd` created.
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tb/tb_mac_unit.cpp
-git commit -m "add MAC testbench with weight loading test"
-```
-
 ---
 
 ### Task 4: Multiply + Passthrough Timing Test
@@ -302,7 +281,6 @@ void test_passthrough_timing(Vmac_unit* dut, VerilatedVcdC* tfp) {
 ```
 
 - [ ] **Step 2: Add call in `main()`, build and run**
-- [ ] **Step 3: Commit**
 
 ---
 
@@ -352,7 +330,6 @@ void test_partial_sum_chain(Vmac_unit* dut, VerilatedVcdC* tfp) {
 ```
 
 - [ ] **Step 2: Add call in `main()`, build and run**
-- [ ] **Step 3: Commit**
 
 ---
 
@@ -391,7 +368,6 @@ void test_weight_chain(Vmac_unit* dut, VerilatedVcdC* tfp) {
 ```
 
 - [ ] **Step 2: Add call in `main()`, build and run**
-- [ ] **Step 3: Commit**
 
 ---
 
@@ -439,7 +415,6 @@ void test_reset(Vmac_unit* dut, VerilatedVcdC* tfp) {
 ```
 
 - [ ] **Step 2: Add call in `main()`, build and run**
-- [ ] **Step 3: Commit**
 
 ---
 
@@ -496,7 +471,6 @@ void test_enable_stall(Vmac_unit* dut, VerilatedVcdC* tfp) {
 ```
 
 - [ ] **Step 2: Add call in `main()`, build and run**
-- [ ] **Step 3: Commit**
 
 ---
 
@@ -545,7 +519,6 @@ void test_signed_values(Vmac_unit* dut, VerilatedVcdC* tfp) {
 ```
 
 - [ ] **Step 2: Add call in `main()`, build and run**
-- [ ] **Step 3: Commit**
 
 ---
 
@@ -571,7 +544,5 @@ The waveform should show:
 - `mult_reg` updates 1 cycle after activation arrives
 - `psum_out` updates 1 cycle after `mult_reg` (= 2 cycles after activation)
 - `a_out`/`b_out` update on the same cycle as `mult_reg` (both stage 1)
-
-- [ ] **Step 3: Final commit (if any cleanup needed)**
 
 Milestone 1 is complete when all 7 test cases pass and the VCD waveform confirms weight-stationary 2-stage pipeline timing.
