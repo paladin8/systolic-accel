@@ -46,6 +46,10 @@ make sim_top       # M4
 - **Timing** — weight load: N cycles; compute: C[m][j] at drain_out[j] at cycle N+m+j from compute start
 - Default params: `DATA_WIDTH=16`, `ACC_WIDTH=32`, `ROWS=COLS=4`
 
+## Git workflow
+
+- **Never commit or push unless explicitly told to.** Do all the work first, then wait for the user to say "commit" or "commit and push."
+
 ## File conventions
 
 - RTL in `rtl/`, testbenches in `tb/`, synthesis scripts in `synth/`
