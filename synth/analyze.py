@@ -31,6 +31,11 @@ def print_table(headers: list[str], rows: list[list], title: str):
         print(fmt.format(*[str(v) for v in row]))
 
 
+def fmt_fmax(r: dict) -> str:
+    fmax = r.get("fmax_mhz")
+    return f"{fmax:.1f}" if fmax is not None else "N/A"
+
+
 def analyze_datawidth(exp: dict):
     """Experiment 1: data width vs area."""
     results = exp["results"]
@@ -41,20 +46,18 @@ def analyze_datawidth(exp: dict):
         luts = r.get("SB_LUT4", 0)
         ffs = r.get("SB_DFFER", 0)
         total = r.get("total_cells", 0)
-        rows.append([f"INT{dw}", luts, ffs, total])
+        rows.append([f"INT{dw}", luts, ffs, total, fmt_fmax(r)])
         labels.append(f"INT{dw}")
         lut_counts.append(luts)
 
-    print_table(["Data Width", "LUTs", "FFs", "Total Cells"], rows,
+    print_table(["Data Width", "LUTs", "FFs", "Total Cells", "Fmax (MHz)"], rows,
                 "Experiment 1: Data Width (4×4 array, depth 2)")
 
-    # Ratios
     if len(lut_counts) >= 2:
         ratio = lut_counts[1] / lut_counts[0] if lut_counts[0] else 0
         print(f"\nINT{results[0]['config']['DATA_WIDTH']} → "
               f"INT{results[1]['config']['DATA_WIDTH']} LUT ratio: {ratio:.1f}x")
 
-    # Chart
     fig, ax = plt.subplots(figsize=(6, 4))
     x = np.arange(len(labels))
     ax.bar(x, lut_counts, color="#4C72B0")
@@ -80,11 +83,11 @@ def analyze_arraysize(exp: dict):
         luts = r.get("SB_LUT4", 0)
         ffs = r.get("SB_DFFER", 0)
         total = r.get("total_cells", 0)
-        rows.append([f"{n}×{n}", luts, ffs, total])
+        rows.append([f"{n}×{n}", luts, ffs, total, fmt_fmax(r)])
         labels.append(f"{n}×{n}")
         lut_counts.append(luts)
 
-    print_table(["Array Size", "LUTs", "FFs", "Total Cells"], rows,
+    print_table(["Array Size", "LUTs", "FFs", "Total Cells", "Fmax (MHz)"], rows,
                 "Experiment 2: Array Size (INT8, depth 2)")
 
     if len(lut_counts) >= 2:
@@ -107,10 +110,10 @@ def analyze_arraysize(exp: dict):
 
 
 def analyze_depth(exp: dict):
-    """Experiment 3: pipeline depth vs area and throughput."""
+    """Experiment 3: pipeline depth vs area (synthesis only, no timing)."""
     results = exp["results"]
     rows = []
-    depths, lut_counts, ff_counts = [], [], []
+    depths, lut_counts = [], []
     for r in results:
         d = r["config"]["PIPELINE_DEPTH"]
         luts = r.get("SB_LUT4", 0)
@@ -119,16 +122,14 @@ def analyze_depth(exp: dict):
         rows.append([f"Depth {d}", luts, ffs, total])
         depths.append(d)
         lut_counts.append(luts)
-        ff_counts.append(ffs)
 
     print_table(["Pipeline Depth", "LUTs", "FFs", "Total Cells"], rows,
-                "Experiment 3: Pipeline Depth (4×4 INT16)")
+                "Experiment 3: Pipeline Depth — Area (4×4 INT16)")
 
-    # Critical path chart
     fig, ax = plt.subplots(figsize=(6, 4))
     x = np.arange(len(depths))
     labels = [f"Depth {d}" for d in depths]
-    ax.bar(x, lut_counts, color="#C44E52", label="LUTs")
+    ax.bar(x, lut_counts, color="#C44E52")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("LUT Count")
@@ -140,28 +141,75 @@ def analyze_depth(exp: dict):
     plt.close(fig)
     print("  → docs/area_vs_depth.png")
 
-    # Throughput comparison (relative, since we don't have timing from generic synth)
-    # Compute-phase cycles: (2N-1) + (PIPELINE_DEPTH - 1), N=4
-    N = 4
+
+def analyze_depth_pnr(exp: dict):
+    """Experiment 4: pipeline depth with P&R timing → real throughput."""
+    results = exp["results"]
+    N = results[0]["config"]["ROWS"]
+
+    # Collect data
+    depths, lut_counts, fmax_values = [], [], []
+    for r in results:
+        d = r["config"]["PIPELINE_DEPTH"]
+        depths.append(d)
+        lut_counts.append(r.get("SB_LUT4", 0))
+        fmax_values.append(r.get("fmax_mhz"))
+
+    # Compute throughput: N^2 * Fmax / compute_cycles
     compute_cycles = [(2 * N - 1) + (d - 1) for d in depths]
-    # Relative throughput = N^2 / compute_cycles (normalized)
-    throughputs = [N * N / c for c in compute_cycles]
+    throughputs = []
+    for i, fmax in enumerate(fmax_values):
+        if fmax is not None:
+            throughputs.append(N * N * fmax / compute_cycles[i])
+        else:
+            throughputs.append(None)
 
-    rows2 = []
+    # Table
+    rows = []
     for i, d in enumerate(depths):
-        rows2.append([f"Depth {d}", compute_cycles[i], f"{throughputs[i]:.2f}"])
-    print_table(["Pipeline Depth", "Compute Cycles", "Rel. Throughput (MACs/cycle)"],
-                rows2, "\nThroughput Analysis (4×4, compute phase only)")
-    print("  Note: depth 3 is synthesis-only (doesn't work in array simulation)")
+        fmax_str = f"{fmax_values[i]:.1f}" if fmax_values[i] else "N/A"
+        tp_str = f"{throughputs[i]:.1f}" if throughputs[i] else "N/A"
+        rows.append([f"Depth {d}", lut_counts[i], compute_cycles[i],
+                     fmax_str, tp_str])
 
+    print_table(
+        ["Pipeline Depth", "LUTs", "Compute Cycles", "Fmax (MHz)", "Throughput (M MACs/s)"],
+        rows,
+        "Experiment 4: Pipeline Depth — Timing & Throughput (4×4 INT8, iCE40 HX8K)"
+    )
+    print(f"  Throughput = N² × Fmax / compute_cycles, N={N}")
+    print(f"  Note: depth 3 is synthesis-only at the array level (breaks column chain)")
+
+    labels = [f"Depth {d}" for d in depths]
+    x = np.arange(len(depths))
+
+    # Fmax chart
+    fmax_plot = [f if f is not None else 0 for f in fmax_values]
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.bar(x, throughputs, color="#8172B2")
+    ax.bar(x, fmax_plot, color="#DD8452")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_ylabel("Relative Throughput (MACs/cycle)")
-    ax.set_title("Throughput vs Pipeline Depth (4×4 INT16)")
-    for i, v in enumerate(throughputs):
-        ax.text(i, v + max(throughputs) * 0.02, f"{v:.2f}", ha="center", fontsize=9)
+    ax.set_ylabel("Fmax (MHz)")
+    ax.set_title("Max Frequency vs Pipeline Depth (4×4 INT8, iCE40 HX8K)")
+    for i, v in enumerate(fmax_plot):
+        if v > 0:
+            ax.text(i, v + max(fmax_plot) * 0.02, f"{v:.1f}", ha="center", fontsize=9)
+    fig.tight_layout()
+    fig.savefig("docs/fmax_vs_depth.png", dpi=150)
+    plt.close(fig)
+    print("  → docs/fmax_vs_depth.png")
+
+    # Throughput chart
+    tp_plot = [t if t is not None else 0 for t in throughputs]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(x, tp_plot, color="#8172B2")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Throughput (M MACs/s)")
+    ax.set_title("Throughput vs Pipeline Depth (4×4 INT8, iCE40 HX8K)")
+    for i, v in enumerate(tp_plot):
+        if v > 0:
+            ax.text(i, v + max(tp_plot) * 0.02, f"{v:.1f}", ha="center", fontsize=9)
     fig.tight_layout()
     fig.savefig("docs/throughput_vs_depth.png", dpi=150)
     plt.close(fig)
@@ -179,6 +227,8 @@ def main():
         analyze_arraysize(data["2_arraysize"])
     if "3_depth" in data:
         analyze_depth(data["3_depth"])
+    if "4_depth_pnr" in data:
+        analyze_depth_pnr(data["4_depth_pnr"])
 
     print("\nDone.")
 
