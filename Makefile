@@ -1,4 +1,4 @@
-.PHONY: sim_mac sim_mac_d1 sim_mac_d3 sim_array sim_array_d1 synth clean
+.PHONY: sim_mac sim_mac_d1 sim_mac_d3 sim_array sim_array_d1 sim_top synth clean
 
 sim_mac:
 	verilator --cc --exe --build --trace \
@@ -45,9 +45,18 @@ sim_array_d1:
 		-o array_sim_d1
 	./obj_dir_array_d1/array_sim_d1
 
+sim_top:
+	verilator --cc --exe --build --trace \
+		-Wall -Wno-fatal \
+		--top-module top --Mdir obj_dir_top \
+		rtl/mac_unit.sv rtl/systolic_array.sv rtl/scratchpad.sv \
+		rtl/controller.sv rtl/top.sv tb/tb_top.cpp \
+		-o top_sim
+	./obj_dir_top/top_sim
+
 synth:
 	uv run python synth/run_sweep.py
 	uv run python synth/analyze.py
 
 clean:
-	rm -rf obj_dir obj_dir_mac_d1 obj_dir_mac_d3 obj_dir_array_d1 waves/*.vcd
+	rm -rf obj_dir obj_dir_mac_d1 obj_dir_mac_d3 obj_dir_array_d1 obj_dir_top waves/*.vcd
