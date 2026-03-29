@@ -175,8 +175,9 @@ void ref_matmul(int16_t* A, int16_t* B, int32_t* C, int M, int K, int BN) {
         }
 }
 
-// Run computation: set dimensions, assert start, poll done
-void run_compute(Vtop* dut, VerilatedVcdC* tfp, int M, int K, int BN) {
+// Run computation: set dimensions, assert start, poll done.
+// Returns the number of cycles from start to done.
+int run_compute(Vtop* dut, VerilatedVcdC* tfp, int M, int K, int BN) {
     dut->dim_m = M;
     dut->dim_k = K;
     dut->dim_n = BN;
@@ -189,11 +190,12 @@ void run_compute(Vtop* dut, VerilatedVcdC* tfp, int M, int K, int BN) {
         tick(dut, tfp);
         if (dut->done) {
             tick(dut, tfp);  // let ctrl_running deassert
-            return;
+            return i + 1;    // cycles from start deassert to done
         }
     }
     printf("TIMEOUT: controller did not assert done\n");
     test_failures++;
+    return -1;
 }
 
 void check_matrix(int32_t* result, int32_t* expected, int M, int CN, const char* name) {
@@ -271,10 +273,11 @@ void test_single_tile(Vtop* dut, VerilatedVcdC* tfp) {
 
     pack_a_tiles(dut, tfp, A, N, N);
     pack_b_tiles(dut, tfp, B, N, N);
-    run_compute(dut, tfp, N, N, N);
+    int cycles = run_compute(dut, tfp, N, N, N);
     unpack_c(dut, tfp, result, N, N);
 
     check_matrix(result, expected, N, N, "single_tile");
+    printf("  single_tile: %d cycles\n", cycles);
 }
 
 // ── Test: K-tiling (4×8 × 8×4) ─────────────────────────────────────────
@@ -293,9 +296,10 @@ void test_k_tiling(Vtop* dut, VerilatedVcdC* tfp) {
     ref_matmul(A, B, expected, M, K, BN);
     pack_a_tiles(dut, tfp, A, M, K);
     pack_b_tiles(dut, tfp, B, K, BN);
-    run_compute(dut, tfp, M, K, BN);
+    int cycles = run_compute(dut, tfp, M, K, BN);
     unpack_c(dut, tfp, result, M, BN);
     check_matrix(result, expected, M, BN, "k_tiling");
+    printf("  k_tiling (4x8 * 8x4): %d cycles\n", cycles);
 }
 
 // ── Test: full tiling (8×8) ─────────────────────────────────────────────
@@ -315,9 +319,10 @@ void test_full_tiling(Vtop* dut, VerilatedVcdC* tfp) {
     ref_matmul(A, B, expected, M, K, BN);
     pack_a_tiles(dut, tfp, A, M, K);
     pack_b_tiles(dut, tfp, B, K, BN);
-    run_compute(dut, tfp, M, K, BN);
+    int cycles = run_compute(dut, tfp, M, K, BN);
     unpack_c(dut, tfp, result, M, BN);
     check_matrix(result, expected, M, BN, "full_tiling");
+    printf("  full_tiling (8x8): %d cycles\n", cycles);
 }
 
 // ── Test: reset mid-computation ─────────────────────────────────────────

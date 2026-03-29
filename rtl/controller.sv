@@ -91,32 +91,41 @@ module controller #(
         c_base = ($clog2(SP_C_DEPTH))'((mt * nt_max + nt) * 16'(ROWS));
     end
 
-    // ── Next-tile base address for SP_B pre-read at end of WRITEBACK ────
+    // ── Next-tile indices and pre-read addresses ─────────────────────────
+    // Loop order: mt innermost, kt middle, nt outermost (weight-stationary).
+    // Weights change only when kt or nt advances (mt wraps).
     logic [15:0] next_kt, next_nt, next_mt;
     logic [$clog2(SP_B_DEPTH)-1:0] next_b_base;
+    logic [$clog2(SP_A_DEPTH)-1:0] next_a_base;
+    logic next_needs_load;  // weights change on next tile?
 
     always_comb begin
-        if (kt + 1'b1 < kt_max) begin
+        if (mt + 1'b1 < mt_max) begin
+            // mt advances — same weights
+            next_mt = mt + 1'b1;
+            next_kt = kt;
+            next_nt = nt;
+        end else if (kt + 1'b1 < kt_max) begin
+            // kt advances — new weights
+            next_mt = '0;
             next_kt = kt + 1'b1;
             next_nt = nt;
-            next_mt = mt;
-        end else if (nt + 1'b1 < nt_max) begin
+        end else begin
+            // nt advances — new weights
+            next_mt = '0;
             next_kt = '0;
             next_nt = nt + 1'b1;
-            next_mt = mt;
-        end else begin
-            next_kt = '0;
-            next_nt = '0;
-            next_mt = mt + 1'b1;
         end
         next_b_base = ($clog2(SP_B_DEPTH))'((next_kt * nt_max + next_nt) * 16'(ROWS));
+        next_a_base = ($clog2(SP_A_DEPTH))'((next_mt * kt_max + next_kt) * 16'(ROWS));
+        next_needs_load = !(mt + 1'b1 < mt_max);
     end
 
     // ── More tiles remaining? ───────────────────────────────────────────
     logic more_tiles;
-    assign more_tiles = (kt + 1'b1 < kt_max) ||
-                        (nt + 1'b1 < nt_max) ||
-                        (mt + 1'b1 < mt_max);
+    assign more_tiles = (mt + 1'b1 < mt_max) ||
+                        (kt + 1'b1 < kt_max) ||
+                        (nt + 1'b1 < nt_max);
 
     // ── Writeback helpers ───────────────────────────────────────────────
     logic wb_is_rmw;
@@ -214,8 +223,14 @@ module controller #(
             end
 
             S_WRITEBACK: begin
-                if (phase_cnt == wb_last)
-                    next_state = more_tiles ? S_LOAD_WEIGHTS : S_DONE;
+                if (phase_cnt == wb_last) begin
+                    if (!more_tiles)
+                        next_state = S_DONE;
+                    else if (next_needs_load)
+                        next_state = S_LOAD_WEIGHTS;
+                    else
+                        next_state = S_FEED;  // reuse weights
+                end
             end
 
             S_DONE: next_state = S_DONE;
@@ -319,9 +334,15 @@ module controller #(
                         sp_c_wdata[j*ACC_WIDTH +: ACC_WIDTH] = drain_regs[phase_cnt[15:0]][j];
                 end
 
-                // On last cycle: pre-read SP_B for next tile's LOAD_WEIGHTS
-                if (phase_cnt == wb_last && more_tiles)
-                    sp_b_addr = next_b_base + ($clog2(SP_B_DEPTH))'(ROWS - 1);
+                // On last cycle: pre-read for next tile
+                if (phase_cnt == wb_last && more_tiles) begin
+                    if (next_needs_load)
+                        // Weights change: pre-read SP_B for LOAD_WEIGHTS
+                        sp_b_addr = next_b_base + ($clog2(SP_B_DEPTH))'(ROWS - 1);
+                    else
+                        // Weights reused: pre-read SP_A for FEED
+                        sp_a_addr = next_a_base;
+                end
             end
 
             default: ; // IDLE, DONE: all at defaults
