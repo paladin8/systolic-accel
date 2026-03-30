@@ -1,0 +1,25 @@
+[tasks]
+depth1_bmc bmc depth1
+depth2_bmc bmc depth2
+depth3_bmc bmc depth3
+depth1_cover cover depth1
+depth2_cover cover depth2
+depth3_cover cover depth3
+
+[options]
+bmc: mode bmc
+cover: mode cover
+depth 8
+
+[engines]
+smtbmc yices
+
+[script]
+read -formal -sv mac_unit.sv
+depth1: chparam -set PIPELINE_DEPTH 1 mac_unit
+depth2: chparam -set PIPELINE_DEPTH 2 mac_unit
+depth3: chparam -set PIPELINE_DEPTH 3 mac_unit
+prep -top mac_unit
+
+[files]
+rtl/mac_unit.sv
