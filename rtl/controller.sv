@@ -240,6 +240,7 @@ module controller #(
     end
 
     // ── Drain register capture ──────────────────────────────────────────
+    // Synthesizes to: ROWS * COLS * ACC_WIDTH flip-flops
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (int r = 0; r < ROWS; r++)
@@ -247,9 +248,9 @@ module controller #(
                     drain_regs[r][c] <= '0;
         end else if (state == S_DRAIN) begin
             for (int j = 0; j < COLS; j++) begin
-                automatic int m = int'(phase_cnt) - 1 - j;
-                if (m >= 0 && m < ROWS)
-                    drain_regs[m][j] <= arr_drain_out[j*ACC_WIDTH +: ACC_WIDTH];
+                // m = phase_cnt - 1 - j.  Valid when 0 <= m < ROWS.
+                if (phase_cnt >= 16'(j + 1) && phase_cnt < 16'(j + 1 + ROWS))
+                    drain_regs[phase_cnt - 16'(j) - 16'd1][j] <= arr_drain_out[j*ACC_WIDTH +: ACC_WIDTH];
             end
         end
     end

@@ -202,6 +202,33 @@ Following the Cerebras WSE approach — what if we tiled our array across an ent
 
 This illustrates the fundamental challenge of wafer-scale compute: the arithmetic units are cheap — you can fit nearly a billion of them. But *feeding* them with data requires enormous on-die SRAM bandwidth that dwarfs anything achievable with off-chip memory. Cerebras addresses this by dedicating approximately 50% of the wafer's die area to SRAM, co-located with compute cores. The memory wall, not the compute wall, is what limits scaling.
 
+### Double-Buffering
+
+The single-buffered design serializes host access and computation: the host loads matrices into scratchpads, the controller computes, the host reads results, and only then can the next batch be loaded. Double-buffering eliminates this gap by providing two physical banks for SP_A and SP_B. While the controller reads from one bank, the host loads the next input data into the other bank.
+
+A 1-bit `bank_sel` input (latched on `start`) selects which bank the controller reads from. A separate `ext_bank` input lets the host independently target either bank. The controller is unchanged — the bank muxing is entirely in `top.sv`.
+
+**Synthesis cost** (4×4 INT8, PD=2, full system with scratchpads and controller):
+
+| Config | LUTs | FFs | Block RAMs | Total Cells | Fmax |
+|--------|------|-----|------------|-------------|------|
+| Single-buffered | 4,181 | 1,462 | 8 | 6,311 | 48.6 MHz |
+| Double-buffered (A/B/C) | 4,628 | 1,679 | 16 | 6,982 | 47.6 MHz |
+| Delta | +447 (+10.7%) | +217 (+14.8%) | +8 (+100%) | +671 (+10.6%) | -1.0 MHz (-2.0%) |
+
+The dominant cost is 8 additional block RAMs — one extra bank for each of SP_A, SP_B, and SP_C. LUT and FF overhead is modest (11-15%) — bank mux logic and the `active_bank` register. Fmax is essentially unchanged (-2%).
+
+**Measured throughput** (4 back-to-back 8×8 matmuls on a 4×4 array):
+
+| Workflow | Total Cycles | Per Batch | Speedup |
+|----------|-------------|-----------|---------|
+| Single-buffered | 913 | 228 | — |
+| Double-buffered | 705 | 176 | 1.30× |
+
+The 30% speedup comes from overlapping three operations with compute: (1) loading next A/B inputs into the non-active bank, (2) reading previous results from the non-active C bank, and (3) eliminating SP_C clearing entirely — the controller always does a direct write on kt=0 before doing RMW on kt>0, so stale data is overwritten automatically.
+
+The remaining serial overhead is the reset (~3 cycles per batch) needed because the controller's S_DONE state is a dead-end. With a S_DONE→S_IDLE transition on `start`, steady-state throughput would approach the compute-only limit of 160 cycles per batch (1.43× speedup).
+
 ## 5. Conclusions
 
 **Key findings from this design:**
@@ -214,9 +241,11 @@ This illustrates the fundamental challenge of wafer-scale compute: the arithmeti
 
 4. **Weight-stationary loop order matters.** The controller's mt-innermost tile loop skips redundant weight loads when only the M-dimension advances. On an 8×8 matmul with a 4×4 array, this saves 9% of compute cycles. The benefit grows with the M-dimension: more activation tiles per weight load means better amortization of the LOAD_WEIGHTS cost.
 
+5. **Double-buffering all three scratchpads gives 1.30× throughput** for 11% more area. Loading, result readback, and even SP_C clearing (which turns out to be unnecessary — kt=0 always overwrites stale data) are all hidden behind compute. The remaining gap to the theoretical maximum is just the reset overhead between computations.
+
 **What a production design would change:**
 
 - **Larger arrays** (128×128+) to increase arithmetic intensity and amortize control overhead.
 - **SRAM macros** instead of register-based scratchpads, for 10–50× better density and lower power per bit.
-- **Double-buffering** to overlap data loading with computation, hiding memory latency across tiles.
+- **Automatic restart** — adding a S_DONE→S_IDLE transition on `start` would eliminate the reset overhead between computations, closing the remaining 10% gap to compute-limited throughput.
 - **Multi-bank memory** with wider data buses to sustain bandwidth as array size grows.
