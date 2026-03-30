@@ -1,4 +1,5 @@
-.PHONY: sim_mac sim_mac_d1 sim_mac_d3 sim_array sim_array_d1 sim_top synth clean
+.PHONY: sim_mac sim_mac_d1 sim_mac_d3 sim_array sim_array_d1 sim_top synth clean \
+       formal_sp formal_mac formal_array formal_ctrl formal_top formal
 
 sim_mac:
 	verilator --cc --exe --build --trace \
@@ -58,5 +59,22 @@ synth:
 	uv run python synth/run_sweep.py
 	uv run python synth/analyze.py
 
+formal_sp:
+	sby -f formal/scratchpad.sby
+
+formal_mac:
+	sby -f formal/mac_unit.sby
+
+formal_array:
+	sby -f formal/systolic_array.sby
+
+formal_ctrl:
+	sby -f formal/controller.sby
+
+formal_top:
+	sby -f formal/top.sby
+
+formal: formal_sp formal_mac formal_array formal_ctrl formal_top
+
 clean:
-	rm -rf obj_dir obj_dir_mac_d1 obj_dir_mac_d3 obj_dir_array_d1 obj_dir_top waves/*.vcd
+	rm -rf obj_dir obj_dir_mac_d1 obj_dir_mac_d3 obj_dir_array_d1 obj_dir_top waves/*.vcd formal/*/

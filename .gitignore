@@ -5,3 +5,4 @@ obj_dir_*/
 .venv/
 synth/logs/
 synth/results.json
+formal/*/
