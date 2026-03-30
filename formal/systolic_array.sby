@@ -1,0 +1,18 @@
+[tasks]
+bmc
+
+[options]
+bmc: mode bmc
+bmc: depth 6
+
+[engines]
+smtbmc yices
+
+[script]
+read -formal -sv mac_unit.sv
+read -formal -sv systolic_array.sv
+prep -top systolic_array
+
+[files]
+rtl/mac_unit.sv
+rtl/systolic_array.sv

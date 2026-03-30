@@ -88,4 +88,88 @@ module systolic_array #(
         end
     endgenerate
 
+// ── Formal verification ───────────────────────────────────────────
+`ifdef FORMAL
+    // -- Common infrastructure --
+    logic f_past_valid;
+    initial f_past_valid = 1'b0;
+    always_ff @(posedge clk)
+        f_past_valid <= 1'b1;
+
+    // Reset assumption: start in reset, once released stay released
+    initial assume (!rst_n);
+    always_ff @(posedge clk)
+        if (f_past_valid && $past(rst_n))
+            assume (rst_n);
+
+    // ── ARR1: Row 0 direct — no skew delay ────────────────────────
+    // Combinational: a_wire[0][0] is directly assigned from a_in
+    always_comb
+        arr1: assert (a_wire[0][0] == a_in[0 +: DATA_WIDTH]);
+
+    // ── ARR2: Row k delay — activation arrives k cycles late ──────
+    // Formal-only delay chains mirror the skew shift registers.
+    // f_delay[k] tracks what a_in[k] looked like k cycles ago.
+    generate
+        for (genvar fk = 1; fk < ROWS; fk++) begin : gen_formal_skew
+            // k-deep shift register tracking a_in[fk]
+            logic [DATA_WIDTH-1:0] f_delay [0:fk-1];
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n) begin
+                    for (int s = 0; s < fk; s++)
+                        f_delay[s] <= '0;
+                end else if (enable) begin
+                    f_delay[0] <= a_in[fk*DATA_WIDTH +: DATA_WIDTH];
+                    for (int s = 1; s < fk; s++)
+                        f_delay[s] <= f_delay[s-1];
+                end
+            end
+
+            // After reset, the skew output should match our delay chain
+            always_ff @(posedge clk)
+                if (f_past_valid && rst_n)
+                    assert (a_wire[fk][0] == f_delay[fk-1]); // ARR2
+        end
+    endgenerate
+
+    // ── ARR3: Skew stall — registers hold when !enable ────────────
+    generate
+        for (genvar fk = 1; fk < ROWS; fk++) begin : gen_formal_stall
+            always_ff @(posedge clk)
+                if (f_past_valid && rst_n && $past(rst_n && !enable))
+                    assert (a_wire[fk][0] == $past(a_wire[fk][0])); // ARR3
+        end
+    endgenerate
+
+    // ── ARR4: Top-edge partial sums are zero ──────────────────────
+    generate
+        for (genvar fj = 0; fj < COLS; fj++) begin : gen_formal_psum
+            always_comb
+                assert (psum_wire[0][fj] == '0); // ARR4
+        end
+    endgenerate
+
+    // ── ARR5: Top-edge weight distribution ────────────────────────
+    generate
+        for (genvar fj = 0; fj < COLS; fj++) begin : gen_formal_btop
+            always_comb
+                assert (b_wire[0][fj] == b_in[fj*DATA_WIDTH +: DATA_WIDTH]); // ARR5
+        end
+    endgenerate
+
+    // ── ARR6: Drain output matches bottom psum ────────────────────
+    generate
+        for (genvar fj = 0; fj < COLS; fj++) begin : gen_formal_drain
+            always_comb
+                assert (drain_out[fj*ACC_WIDTH +: ACC_WIDTH] == psum_wire[ROWS][fj]); // ARR6
+        end
+    endgenerate
+
+    // ── ARR7: Cover — last row's skew register propagates a value ─
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n)
+            arr7: cover (a_wire[ROWS-1][0] != '0);
+`endif
+
 endmodule
