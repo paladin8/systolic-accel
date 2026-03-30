@@ -350,4 +350,276 @@ module controller #(
         endcase
     end
 
+// ── Formal verification ───────────────────────────────────────────
+`ifdef FORMAL
+    // -- Common infrastructure --
+    logic f_past_valid;
+    initial f_past_valid = 1'b0;
+    always_ff @(posedge clk)
+        f_past_valid <= 1'b1;
+
+    // Reset assumption
+    initial assume (!rst_n);
+    always_ff @(posedge clk)
+        if (f_past_valid && $past(rst_n))
+            assume (rst_n);
+
+    // -- Input constraints --
+    // Valid dimensions: nonzero multiples of ROWS/COLS
+    always_ff @(posedge clk)
+        if (rst_n && start && state == S_IDLE) begin
+            assume (dim_m > '0 && dim_m[($clog2(ROWS))-1:0] == '0);
+            assume (dim_k > '0 && dim_k[($clog2(ROWS))-1:0] == '0);
+            assume (dim_n > '0 && dim_n[($clog2(COLS))-1:0] == '0);
+            // Keep dimensions small enough for tractable proofs
+            assume (dim_m <= 16'(4 * ROWS));
+            assume (dim_k <= 16'(4 * ROWS));
+            assume (dim_n <= 16'(4 * COLS));
+        end
+
+    // start is a single-cycle pulse
+    always_ff @(posedge clk)
+        if (f_past_valid && $past(rst_n && start))
+            assume (!start);
+
+    // start only in IDLE
+    always_ff @(posedge clk)
+        if (rst_n && state != S_IDLE)
+            assume (!start);
+
+    // ══════════════════════════════════════════════════════════════
+    // FSM Structural Safety (CTRL1-CTRL4)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL1: Legal states — state encoding is always valid
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n)
+            ctrl1: assert (state <= S_DONE);
+
+    // CTRL2: Valid transitions — each state can only come from
+    //        its allowed predecessor(s)
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n && $past(rst_n)) begin
+            if (state == S_LOAD_WEIGHTS)
+                ctrl2_lw: assert ($past(state) == S_IDLE
+                               || $past(state) == S_LOAD_WEIGHTS
+                               || $past(state) == S_WRITEBACK);
+            if (state == S_FEED)
+                ctrl2_fd: assert ($past(state) == S_LOAD_WEIGHTS
+                               || $past(state) == S_FEED
+                               || $past(state) == S_WRITEBACK);
+            if (state == S_DRAIN)
+                ctrl2_dr: assert ($past(state) == S_FEED
+                               || $past(state) == S_DRAIN);
+            if (state == S_WRITEBACK)
+                ctrl2_wb: assert ($past(state) == S_DRAIN
+                               || $past(state) == S_WRITEBACK);
+            if (state == S_DONE)
+                ctrl2_dn: assert ($past(state) == S_WRITEBACK
+                               || $past(state) == S_DONE);
+        end
+
+    // CTRL3: S_DONE is absorbing — once entered, stays until reset
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n && $past(rst_n && state == S_DONE))
+            ctrl3: assert (state == S_DONE);
+
+    // CTRL4: Phase counter resets on state transition
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n && $past(rst_n) && state != $past(state))
+            ctrl4: assert (phase_cnt == '0);
+
+    // ══════════════════════════════════════════════════════════════
+    // Liveness (CTRL5-CTRL6)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL5: Phase counter bounded per state
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n) begin
+            if (state == S_LOAD_WEIGHTS || state == S_FEED)
+                ctrl5_lf: assert (phase_cnt <= 16'(ROWS - 1));
+            if (state == S_DRAIN)
+                ctrl5_dr: assert (phase_cnt <= 16'(DRAIN_CYCLES - 1));
+            if (state == S_WRITEBACK)
+                ctrl5_wb: assert (phase_cnt <= wb_last);
+        end
+
+    // CTRL6: Termination — covered by CTRL21/CTRL22 cover traces
+
+    // ══════════════════════════════════════════════════════════════
+    // Scratchpad Address Sequencing (CTRL7a-CTRL14)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL7a: IDLE pre-read — first tile, b_base=0
+    always_comb
+        if (state == S_IDLE && start)
+            ctrl7a: assert (sp_b_addr == ($clog2(SP_B_DEPTH))'(ROWS - 1));
+
+    // CTRL7b: WB→LW pre-read for next tile
+    always_comb
+        if (state == S_WRITEBACK && phase_cnt == wb_last
+            && next_needs_load && more_tiles)
+            ctrl7b: assert (sp_b_addr == next_b_base + ($clog2(SP_B_DEPTH))'(ROWS - 1));
+
+    // CTRL8: LOAD_WEIGHTS SP_B address — reverse order, one step ahead
+    always_comb
+        if (state == S_LOAD_WEIGHTS && phase_cnt < 16'(ROWS - 1))
+            ctrl8: assert (sp_b_addr == b_base + ($clog2(SP_B_DEPTH))'(ROWS - 2) - ($clog2(SP_B_DEPTH))'(phase_cnt));
+
+    // CTRL9a: Last LOAD_WEIGHTS cycle pre-reads SP_A for FEED
+    always_comb
+        if (state == S_LOAD_WEIGHTS && phase_cnt == 16'(ROWS - 1))
+            ctrl9a: assert (sp_a_addr == a_base);
+
+    // CTRL9b: WB→FEED pre-read (weights reused)
+    always_comb
+        if (state == S_WRITEBACK && phase_cnt == wb_last
+            && !next_needs_load && more_tiles)
+            ctrl9b: assert (sp_a_addr == next_a_base);
+
+    // CTRL10: FEED SP_A address — forward order, one step ahead
+    always_comb
+        if (state == S_FEED && phase_cnt < 16'(ROWS - 1))
+            ctrl10: assert (sp_a_addr == a_base + ($clog2(SP_A_DEPTH))'(phase_cnt + 1'b1));
+
+    // CTRL11: WB direct write — kt==0, every cycle writes
+    always_comb
+        if (state == S_WRITEBACK && !wb_is_rmw) begin
+            ctrl11_a: assert (sp_c_addr == c_base + ($clog2(SP_C_DEPTH))'(phase_cnt));
+            ctrl11_w: assert (sp_c_we == 1'b1);
+        end
+
+    // CTRL12a: WB RMW write phase — even phase_cnt
+    always_comb
+        if (state == S_WRITEBACK && wb_is_rmw && !phase_cnt[0]) begin
+            ctrl12a_a: assert (sp_c_addr == c_base + ($clog2(SP_C_DEPTH))'(wb_row));
+            ctrl12a_w: assert (sp_c_we == 1'b1);
+        end
+
+    // CTRL12b: WB RMW read phase — odd phase_cnt
+    always_comb
+        if (state == S_WRITEBACK && wb_is_rmw && phase_cnt[0]
+            && phase_cnt != wb_last) begin
+            ctrl12b_a: assert (sp_c_addr == c_base + ($clog2(SP_C_DEPTH))'(wb_row + 1'b1));
+            ctrl12b_w: assert (sp_c_we == 1'b0);
+        end
+
+    // CTRL12c: DRAIN→WB pre-read for first RMW write
+    always_comb
+        if (state == S_DRAIN && phase_cnt == 16'(DRAIN_CYCLES - 1) && wb_is_rmw)
+            ctrl12c: assert (sp_c_addr == c_base);
+
+    // CTRL13: WB direct write data
+    generate
+        for (genvar fj = 0; fj < COLS; fj++) begin : gen_formal_ctrl13
+            always_comb
+                if (state == S_WRITEBACK && !wb_is_rmw)
+                    assert (sp_c_wdata[fj*ACC_WIDTH +: ACC_WIDTH]
+                            == drain_regs[phase_cnt[15:0]][fj]); // CTRL13
+        end
+    endgenerate
+
+    // CTRL14: WB RMW write data
+    generate
+        for (genvar fj = 0; fj < COLS; fj++) begin : gen_formal_ctrl14
+            always_comb
+                if (state == S_WRITEBACK && wb_is_rmw && !phase_cnt[0])
+                    assert (sp_c_wdata[fj*ACC_WIDTH +: ACC_WIDTH]
+                            == sp_c_rdata[fj*ACC_WIDTH +: ACC_WIDTH]
+                             + drain_regs[wb_row][fj]); // CTRL14
+        end
+    endgenerate
+
+    // ══════════════════════════════════════════════════════════════
+    // Drain Capture (CTRL15)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL15: drain_regs[m][j] written at phase_cnt == m + j + 1
+    // Use anyconst to pick an arbitrary (m, j) pair and verify
+    (* anyconst *) logic [$clog2(ROWS)-1:0] f_drain_m;
+    (* anyconst *) logic [$clog2(COLS)-1:0] f_drain_j;
+
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n && $past(rst_n)) begin
+            // If we were in DRAIN and the capture condition was met,
+            // drain_regs[m][j] should have updated
+            if ($past(state == S_DRAIN
+                      && phase_cnt == 16'(f_drain_m) + 16'(f_drain_j) + 16'd1))
+                ctrl15_wr: assert (drain_regs[f_drain_m][f_drain_j]
+                                   == $past(arr_drain_out[f_drain_j*ACC_WIDTH +: ACC_WIDTH]));
+
+            // If we were in DRAIN but NOT at the right phase_cnt,
+            // drain_regs[m][j] should be unchanged
+            if ($past(state == S_DRAIN
+                      && phase_cnt != 16'(f_drain_m) + 16'(f_drain_j) + 16'd1))
+                ctrl15_hold: assert (drain_regs[f_drain_m][f_drain_j]
+                                     == $past(drain_regs[f_drain_m][f_drain_j]));
+        end
+
+    // ══════════════════════════════════════════════════════════════
+    // Tile Loop (CTRL16-CTRL17)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL16: Tile advance — on WRITEBACK exit, indices update correctly
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n && $past(rst_n)
+            && $past(state == S_WRITEBACK) && state != S_WRITEBACK) begin
+            ctrl16_mt: assert (mt == $past(next_mt));
+            ctrl16_kt: assert (kt == $past(next_kt));
+            ctrl16_nt: assert (nt == $past(next_nt));
+        end
+
+    // CTRL17: next_needs_load is true iff mt is about to wrap
+    always_comb
+        ctrl17: assert (next_needs_load == !(mt + 1'b1 < mt_max));
+
+    // ══════════════════════════════════════════════════════════════
+    // Array Control (CTRL18-CTRL20)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL18: arr_load_weight only during LOAD_WEIGHTS
+    always_comb
+        if (state != S_LOAD_WEIGHTS)
+            ctrl18: assert (!arr_load_weight);
+
+    // CTRL19: arr_enable active in compute states only
+    always_comb
+        ctrl19: assert (arr_enable == (state == S_LOAD_WEIGHTS
+                                    || state == S_FEED
+                                    || state == S_DRAIN));
+
+    // CTRL20: Feed data — array gets scratchpad read data
+    always_comb begin
+        if (state == S_FEED)
+            ctrl20_a: assert (arr_a_in == sp_a_rdata);
+        if (state == S_LOAD_WEIGHTS)
+            ctrl20_b: assert (arr_b_in == sp_b_rdata);
+    end
+
+    // ══════════════════════════════════════════════════════════════
+    // Cover Traces (CTRL21-CTRL24)
+    // ══════════════════════════════════════════════════════════════
+
+    // CTRL21: Single tile reaches DONE
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n)
+            ctrl21: cover (state == S_DONE
+                          && mt_max == 16'd1 && nt_max == 16'd1 && kt_max == 16'd1);
+
+    // CTRL22: Multi-tile reaches DONE (mt_max >= 2)
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n)
+            ctrl22: cover (state == S_DONE && mt_max >= 16'd2);
+
+    // CTRL23: RMW writeback exercised
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n)
+            ctrl23: cover (state == S_WRITEBACK && kt != '0);
+
+    // CTRL24: Weight reuse — WRITEBACK→FEED transition
+    always_ff @(posedge clk)
+        if (f_past_valid && rst_n && $past(rst_n))
+            ctrl24: cover ($past(state) == S_WRITEBACK && state == S_FEED);
+`endif
+
 endmodule

@@ -1,0 +1,22 @@
+[tasks]
+bmc
+cover
+prove
+
+[options]
+bmc: mode bmc
+bmc: depth 30
+cover: mode cover
+cover: depth 100
+prove: mode prove
+prove: depth 30
+
+[engines]
+smtbmc yices
+
+[script]
+read -formal -sv controller.sv
+prep -top controller
+
+[files]
+rtl/controller.sv
